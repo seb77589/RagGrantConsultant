@@ -28,10 +28,18 @@ secrets/
 # These are large, re-downloadable, and third-party licensed: keep them local.
 # Commit the fetch scripts and the source manifest (identifier, URL, source
 # date, fetch date, checksum), never the payloads.
-data/raw/
-data/interim/
-data/processed/
-data/cache/
+# Ignore the contents, not the directories themselves: git does not descend
+# into an ignored directory, so a negation could not rescue .gitkeep from one.
+data/raw/*
+data/interim/*
+data/processed/*
+data/cache/*
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+!data/cache/.gitkeep
+# data/reference holds the committed source manifest, benchmark results and
+# small curated lookup tables. Not ignored.
 downloads/
 corpus/
 *.pdf

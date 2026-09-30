@@ -4,11 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-There is no code, build system, or test suite in this repository yet. The only file is
-`compass_artifact_wf-74a0c4d9-b271-53b8-93db-67162cf90f3f_text_markdown.md`, a feasibility and
-analysis report for the planned system. Everything below is distilled from that report — it is the
-design that new code is expected to follow, not a description of existing code. Update this file
-with real commands as soon as a build, test, or run path exists.
+Phase 1, early. The ingestion pipeline works end to end for CORDIS; none of the runtime stack is
+built yet. The design below comes from
+`compass_artifact_wf-74a0c4d9-b271-53b8-93db-67162cf90f3f_text_markdown.md`, the feasibility
+report, which remains the design record. Where measurement has since contradicted it,
+`docs/measurements.md` wins — see "Scale and hardware constraints".
+
+```bash
+uv sync                          # core pipeline (Python 3.12, pinned: ML wheels lack 3.13+)
+uv sync --extra embed            # adds torch, transformers, FlagEmbedding (large)
+
+uv run gcr fetch horizon         # download CORDIS bulk, record it in the source manifest
+uv run gcr sections horizon      # build sections, print the corpus profile
+uv run gcr benchmark-embed horizon --n 10000
+uv run gcr manifest              # show what has been fetched
+
+uv run --with pytest pytest                     # whole suite; no network, no GPU needed
+uv run --with pytest pytest -q -k abbreviation  # one test by name
+uv run --with ruff ruff check src tests         # lint set is pinned in pyproject.toml
+```
+
+Not installed on the development machine, and needed for the next phase: `podman`, `postgresql`
+with `pgvector`, `caddy`.
 
 ## What is being built
 
@@ -75,17 +92,27 @@ broken by new code:
 
 ## Scale and hardware constraints
 
-Target laptop: 16 GB GPU memory, 64 GB system memory, ~8 TB SSD.
+Actual machine: RTX 3080 Laptop (15.6 GB usable VRAM), 61 GB system RAM, **385 GB free disk —
+not the ~8 TB the report assumed**, so raw corpus, weights and snapshots need managing.
 
-- **Cap the core corpus at about 500,000 sections**; Phase 1 targets 300,000–400,000. Use
-  half-precision vectors above 500,000.
-- Model footprint at 4-bit with context capped at 16k–32k tokens is roughly 9–12 GB of the 16 GB
-  available. Do not run with Qwen's full 262k context — reranked retrieval needs only 6–10 sections.
-- The GPU cannot embed and generate at full speed simultaneously. Run bulk embedding with the chat
-  model stopped, or overnight; expect thermal throttling on long runs.
-- Re-embedding after a chunking change is the real cost (a full day at 1M sections), so treat
-  chunking decisions as expensive to reverse.
-- Measure actual throughput on 10,000 sections before committing to any of the report's estimates.
+Measured, superseding the report's estimates (full numbers and caveats in `docs/measurements.md`):
+
+- **bge-m3 embeds at ~141 sections/s at 1.42 GB peak VRAM**, batch 32. Throughput is flat from
+  batch 16 to 64 and falls off at 128: the card is compute-bound, not batch-bound.
+- That puts 500,000 sections at about **1 hour**, against the report's 5–13 h. Re-embedding after a
+  chunking change is therefore roughly an hour, not a day — chunking is far less expensive to
+  reverse than planned, though still versioned via `CHUNKING_VERSION`.
+- **The 500,000-section core cap was justified partly by embedding cost, so that justification is
+  now weak.** Do not treat the cap as settled; revisit it once HNSW build time and search latency
+  are measured, which needs PostgreSQL and pgvector installed.
+- 1.42 GB peak VRAM against 15.6 GB available means the generation model can likely stay resident
+  during bulk embedding, contrary to the report's advice to stop it. Not yet verified with Qwen
+  loaded alongside.
+- Still unmeasured and still to be respected: Qwen at 4-bit with context capped at 16k–32k tokens
+  (never the full 262k — reranked retrieval needs only 6–10 sections), thermal throttling on
+  multi-hour runs, HNSW build time, and search latency.
+- Always measure token counts with the real bge-m3 tokenizer. The character heuristic used as a
+  fallback over-estimates by about 17%, which inflates section counts and causes needless splits.
 
 ## Phasing
 
@@ -94,3 +121,8 @@ publishers, every stack item exercised, ~150-question evaluation set, migration-
 a frozen snapshot. Phase 2 (~210–340 h cumulative) adds all-country coverage, the link-out registry
 of national authorities, regional aid intensities, programme association status, Eurostars national
 rules, application checklists, and a 300+ question per-country evaluation set.
+
+Corpus sizing has already moved: CORDIS Horizon Europe alone yields 50,940 sections from 23,613
+projects, and H2020 should add roughly 75,000. That is about 126,000 against the report's central
+estimate of 80,000 for both datasets combined, so CORDIS is a larger share of the corpus than
+planned.
