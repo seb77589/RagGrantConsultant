@@ -1,0 +1,195 @@
+# ---------------------------------------------------------------------------
+# Secrets and local configuration
+# ---------------------------------------------------------------------------
+# The login chain (Caddy -> Authelia -> LLDAP) and the database all need
+# secrets that must never reach the remote. Commit *.example templates instead.
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+!secrets/.gitkeep
+*.pem
+*.key
+*.crt
+*.p12
+# Authelia / LLDAP / PostgreSQL runtime config with credentials baked in
+**/authelia/configuration.yml
+**/authelia/users_database.yml
+**/lldap/lldap_config.toml
+.pgpass
+.pgservice.conf
+
+# ---------------------------------------------------------------------------
+# Raw corpus and downloaded sources
+# ---------------------------------------------------------------------------
+# CORDIS bulk dumps, Funding & Tenders API pulls, EUR-Lex/CELLAR fetches,
+# Kohesio and Cohesion Open Data exports, work-programme and guide PDFs.
+# These are large, re-downloadable, and third-party licensed: keep them local.
+# Commit the fetch scripts and the source manifest (identifier, URL, source
+# date, fetch date, checksum), never the payloads.
+data/raw/
+data/interim/
+data/processed/
+data/cache/
+downloads/
+corpus/
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+# Bulk tabular exports. Small curated lookup tables should be force-added:
+#   git add -f data/reference/nuts_lookup.csv
+*.csv
+*.tsv
+*.xlsx
+*.xls
+!data/reference/**/*.csv
+!data/reference/**/*.tsv
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.tsv
+
+# ---------------------------------------------------------------------------
+# Embeddings, indexes and database artefacts
+# ---------------------------------------------------------------------------
+# Re-embedding is the expensive, reproducible step (roughly a day at 1M
+# sections) - the vectors themselves are derived output, not source.
+embeddings/
+vectors/
+index/
+*.npy
+*.npz
+*.faiss
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+
+# PostgreSQL dumps used for the migration-equivalence proof. Keep the fixed
+# question set and the comparison report in git; keep the snapshots out.
+*.dump
+*.sql.gz
+*.backup
+pgdata/
+postgres-data/
+db/snapshots/
+
+# ---------------------------------------------------------------------------
+# Model weights and serving caches
+# ---------------------------------------------------------------------------
+# Qwen3.5-9B (4-bit), bge-m3, bge-reranker-v2-m3 - tens of gigabytes, pulled
+# from upstream by digest. Pin versions in config, not in git.
+models/
+weights/
+.cache/
+.huggingface/
+huggingface/
+hf_cache/
+.ollama/
+.torch/
+.triton/
+
+# ---------------------------------------------------------------------------
+# Container runtime (rootless Podman + Quadlet)
+# ---------------------------------------------------------------------------
+# Commit the .container/.volume/.network unit files; ignore generated units,
+# volume contents and local overrides.
+volumes/
+*.generated.service
+compose.override.yml
+docker-compose.override.yml
+podman-compose.override.yml
+.containerenv
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+develop-eggs/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+nosetests.xml
+.hypothesis/
+.ipynb_checkpoints/
+uv.lock.local
+
+# ---------------------------------------------------------------------------
+# Node / frontend (if a web UI lands here)
+# ---------------------------------------------------------------------------
+node_modules/
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+.parcel-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Logs, runtime and scratch
+# ---------------------------------------------------------------------------
+logs/
+*.log
+tmp/
+temp/
+scratch/
+out/
+outputs/
+run/
+*.pid
+*.sock
+
+# ---------------------------------------------------------------------------
+# Editor and OS
+# ---------------------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.direnv/
+
+# ---------------------------------------------------------------------------
+# Claude Code
+# ---------------------------------------------------------------------------
+# CLAUDE.md is committed on purpose - it is shared project guidance.
+.claude/settings.local.json
