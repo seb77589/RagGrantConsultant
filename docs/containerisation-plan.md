@@ -48,12 +48,12 @@ This file links to them rather than duplicating them.
 | 3 | Pipeline image | **done** | 2026-10-01 | `9606587` |
 | 4 | Parity gate | **done** | 2026-10-01 | `78c3964` |
 | 5 | Model tier (embed, rerank, generate) | **done** | 2026-10-01 | `0da4802` |
-| 6 | Load, index, and the blocked measurements | **done** | 2026-10-01 | |
-| 7 | Identity tier (LLDAP, Authelia) | **done** | 2026-10-01 | |
-| 8 | Edge (Caddy, forward auth, TLS) | **done** | 2026-10-01 | |
-| 9 | Group-to-row-level access | **done** | 2026-10-01 | |
-| 10 | Migration-equivalence proof | **done** | 2026-10-01 | |
-| 11 | Cleanliness audit and resumability | **done** | 2026-10-01 | |
+| 6 | Load, index, and the blocked measurements | **done** | 2026-10-01 | `2772d8b` |
+| 7 | Identity tier (LLDAP, Authelia) | **done** | 2026-10-01 | `649fbcf` |
+| 8 | Edge (Caddy, forward auth, TLS) | **done** | 2026-10-01 | `649fbcf` |
+| 9 | Group-to-row-level access | **done** | 2026-10-01 | `649fbcf` |
+| 10 | Migration-equivalence proof | **done** | 2026-10-01 | `ba8aace` |
+| 11 | Cleanliness audit and resumability | **done** | 2026-10-01 | `7f986f0` |
 
 ---
 
