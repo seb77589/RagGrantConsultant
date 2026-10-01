@@ -47,7 +47,7 @@ This file links to them rather than duplicating them.
 | 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | `35da3b1` |
 | 3 | Pipeline image | **done** | 2026-10-01 | `9606587` |
 | 4 | Parity gate | **done** | 2026-10-01 | |
-| 5 | Model tier (embed, rerank, generate) | not started | | |
+| 5 | Model tier (embed, rerank, generate) | **done** | 2026-10-01 | |
 | 6 | Load, index, and the blocked measurements | not started | | |
 | 7 | Identity tier (LLDAP, Authelia) | not started | | |
 | 8 | Edge (Caddy, forward auth, TLS) | not started | | |
@@ -125,6 +125,7 @@ GrantConsultantRAG/
 │   ├── authelia/configuration.yml.example
 │   ├── lldap/lldap_config.toml.example
 │   ├── gen-secrets.sh            # idempotent: writes .env and secrets/
+│   ├── fetch-model.sh            # pulls the GGUF into the gcr_models volume, size-checked
 │   └── db/
 │       ├── initdb/               # 00-authelia-db.sh, 01-extensions.sql, 02-schema.sql, 03-indexes.sql
 │       └── hnsw.sql              # built after the bulk load, in 6.2, so the timing means something
@@ -174,12 +175,13 @@ settled.
 
 | ID | Risk | Status |
 |---|---|---|
-| R1 | Qwen3.5-9B on llama.cpp | **open** |
-| R2 | VRAM has no grace | **open** |
+| R1 | Qwen3.5-9B on llama.cpp | **closed in 5.0** — coherent on sm_86 at 16k ctx |
+| R2 | VRAM has no grace | **closed in 5.5** — 8.5 GB of 16, 7.2 GB spare |
 | R3 | Caddy local CA needs manual trust | **open** |
 | R4 | Docker 29 containerd image store | **confirmed, benign here** — see below |
-| R5 | Healthcheck false-negatives on first start | **open** |
+| R5 | Healthcheck false-negatives on first start | **hit, and fixed** — see below |
 | R6 | Compose CDI needs `capabilities: [gpu]` | **closed in 0.2** — see below |
+| R7 | llama.cpp mangles `--flag=value` | **closed in 5.3** — pass flag and value separately |
 
 **R1 — Qwen3.5-9B on llama.cpp is the single biggest risk.** The model is not the plain dense 9B the
 feasibility report implies: it is hybrid **Gated DeltaNet + sparse MoE**, multimodal, 262k native
@@ -423,31 +425,38 @@ Section IDs, text and token counts are also identical to the pre-containerisatio
 
 ## Phase 5 — Model tier
 
-- [ ] **5.0 Risk spike first (R1).** Stand up `llm` alone, load the Qwen GGUF, disable thinking, and
+- [x] **5.0 Risk spike first (R1).** Stand up `llm` alone, load the Qwen GGUF, disable thinking, and
       run a handful of grounded-answer prompts. Judge **coherence**, not just HTTP 200 — GDN bugs
       manifest as plausible-looking gibberish or instant EOS. If it fails, switch to the plain-dense
       fallback and record the decision here. **Nothing downstream is built until this passes.**
-- [ ] **5.1 `tei-embed` serving `BAAI/bge-m3`**, weights on `gcr_hf_cache`, with **`--pooling cls`
+- [x] **5.1 `tei-embed` serving `BAAI/bge-m3`**, weights on `gcr_hf_cache`, with **`--pooling cls`
       passed explicitly** — bge-m3 is CLS-pooled, and a silent fall-through to mean pooling degrades
       retrieval in a way that merely looks like a mediocre model.
-- [ ] **5.2 `tei-rerank` serving `BAAI/bge-reranker-v2-m3`** via TEI's native `/rerank` (there is no
+- [x] **5.2 `tei-rerank` serving `BAAI/bge-reranker-v2-m3`** via TEI's native `/rerank` (there is no
       OpenAI-compatible rerank route), with a reduced `--max-batch-tokens`.
-- [ ] **5.3 Finalise `llm` flags** — `--host 0.0.0.0` (it binds loopback by default and would be
+- [x] **5.3 Finalise `llm` flags** — `--host 0.0.0.0` (it binds loopback by default and would be
       unreachable in a container), `--ctx-size 16384`, `-ngl all`,
       `--cache-type-k q8_0 --cache-type-v q8_0`, thinking disabled, and a mounted GGUF rather than
       `-hf` so startup is offline and reproducible.
-- [ ] **5.4 Record the real model, quantisation and flags** in [`measurements.md`](measurements.md) —
+- [x] **5.4 Record the real model, quantisation and flags** in [`measurements.md`](measurements.md) —
       the report's bare "Qwen3.5-9B" is not enough to reproduce a run.
-- [ ] **5.5 Measure total VRAM** with all three resident, against 15.9 GB and the report's 9–12 GB
+- [x] **5.5 Measure total VRAM** with all three resident, against 15.9 GB and the report's 9–12 GB
       estimate. This also settles the open question in `measurements.md` about whether the generation
       model can stay resident during bulk embedding.
 
-**Validation**
+**Validation** — run, passed. All four services healthy; full numbers in
+[`measurements.md`](measurements.md).
 
-Each endpoint answers a smoke request; `nvidia-smi` shows all three resident within budget; and — the
-check that actually matters — embedding a known string through TEI gives a 1024-dim vector whose
-cosine similarity to the local FlagEmbedding vector for the same string is **≥ 0.99**. If the two
-embedding paths disagree, the index and the query encoder disagree, and retrieval degrades silently.
+- `tei-embed` `/v1/embeddings` returns 1024 dimensions; `tei-rerank` `/rerank` ranks the relevant
+  text at 0.8314 and the two irrelevant ones at 0.0000.
+- **VRAM: 8,732 MiB of 16,384 with all three resident** (llm 5,958 / embed 1,362 / rerank 1,330),
+  leaving 7,244 MiB free — against the plan's 11–14 GB estimate and the report's 9–12 GB. R2 is far
+  less tight than feared, and it settles the open question in `measurements.md`: **the generation
+  model can stay resident during bulk embedding**, since embedding peaks at 1.42 GB.
+- The check that actually matters — TEI versus local FlagEmbedding on identical input — gives
+  **worst-case cosine 0.999988** against the 0.99 bar, across ASCII, numeric and non-ASCII text.
+  That also confirms `--pooling cls` took effect; mean pooling would have shown here as a much
+  lower cosine.
 
 ---
 
@@ -725,3 +734,37 @@ have passed this straight through.
 One consequence to be aware of: step 4.4 ran `gcr fetch --force`, so the manifest now has a second
 record and later `sections` runs will carry that newer `fetch_date`. The payload sha256 is unchanged,
 so the corpus text is unaffected.
+
+### 2026-10-01 — Phase 5 complete: both big risks closed
+
+**R1 is closed.** Qwen3.5-9B runs correctly on sm_86 at 16k context. It extracted a funding rate and
+deadline from supplied context, **declined to invent a deadline the context did not contain**, and
+produced 400 tokens of accurate sustained prose with no drift and no premature EOS. The known Gated
+DeltaNet defects (sm_70 kernel crash, instant-EOS past ~130k context) did not appear, as hoped. This
+remains a smoke test rather than an evaluation, and the plain-dense Qwen3-8B fallback stays on record.
+
+**R2 is closed, and generously.** 8.5 GB resident of 16 GB, 7.2 GB free. Both the report (9–12 GB)
+and this plan (11–14 GB) over-estimated. The practical consequence is recorded in `measurements.md`:
+the report's advice to stop the chat model during bulk embedding is unnecessary.
+
+**R5 was hit exactly as predicted, twice over, and the fix was the opposite of the advice.** The
+guidance was that these slim images lack `curl`, so healthchecks should avoid it. Both images in fact
+*have* `curl` — and what they lack is everything else: `wget`, `nc`, `python3`, and in llama.cpp's
+case a `sh` that supports `/dev/tcp` (it is dash). The `/dev/tcp` healthcheck I wrote to avoid curl
+therefore failed while the service was serving perfectly, reporting `unhealthy` against a `/health`
+that returned `{"status":"ok"}`. Both now use `curl -fsS`. The TEI check was also weak in a way worth
+noting: probing `--help` passes while weights are still downloading, so it would have reported healthy
+on a service that could not answer.
+
+**A new failure mode, R7: llama.cpp mangles `--flag=value`.** Its argument parser normalises
+underscores to hyphens across the entire token, so
+`--model=/models/Qwen3.5-9B-UD-Q4_K_XL.gguf` arrived as `...Q4-K-XL.gguf` and the server crash-looped
+on a file that does not exist — while `docker compose config` showed the correct name and the file
+was present under the correct name. Every flag for this service is now passed as two separate tokens.
+TEI, being Rust/clap, is unaffected and keeps the `--flag=value` form.
+
+Smaller things: `--chat-template-kwargs '{"enable_thinking":false}'` works but is deprecated in favour
+of `--reasoning off`, which is what the service now uses. And `containers/fetch-model.sh` needed
+`--user 0:0`, because a fresh named volume is root-owned while the curl image runs as uid 100 — the
+failure surfaces as `curl: (23) client returned ERROR on write`, which reads like a network fault and
+is a permission one.

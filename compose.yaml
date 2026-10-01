@@ -123,6 +123,156 @@ services:
               capabilities: ["gpu"]
               device_ids: ["nvidia.com/gpu=0"]
 
+  # ---------------------------------------------------------------------
+  # Model serving (plan phase 5). Three containers share the one GPU; the
+  # driver time-slices between them. VRAM is summed, not shared, so the
+  # budget is the binding constraint -- see risk R2 in the plan.
+  # ---------------------------------------------------------------------
+
+  # Dense embeddings for the vector half of hybrid retrieval.
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:86-1.9.4
+    # `86` is the Ampere sm_86 build, which is what an RTX 3080 Laptop is.
+    profiles: ["models"]
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - "--model-id=${EMBED_MODEL_ID:-BAAI/bge-m3}"
+      # bge-m3 is CLS-pooled. TEI should infer this from 1_Pooling/config.json,
+      # but it is stated explicitly because a silent fall-through to mean
+      # pooling degrades retrieval in a way that merely looks like a weak model
+      # -- the kind of failure that gets blamed on the corpus for weeks.
+      - "--pooling=cls"
+      # Chunks are capped at 512 tokens (MAX_TOKENS), far below bge-m3's 8192.
+      - "--max-client-batch-size=64"
+      - "--auto-truncate"
+    environment:
+      HUGGINGFACE_HUB_CACHE: /data
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # Same cache as the pipeline, so bge-m3 is downloaded once and the
+      # weights used for indexing are literally the weights used for queries.
+      - hf_cache:/data
+    networks:
+      - backend
+    healthcheck:
+      # TEI listens on 80 inside the container, not 8080. `curl` is present in
+      # this image (wget and python3 are not), and hitting /health proves the
+      # model is actually serving -- a `--help` probe would pass while the
+      # weights were still downloading.
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Weight download plus load. Too short and compose tears the stack down
+      # during the very first pull -- see risk R5.
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              capabilities: ["gpu"]
+              device_ids: ["nvidia.com/gpu=0"]
+
+  # Reranking, applied to the merged keyword+vector candidates before the top
+  # 6-10 sections reach the generation context.
+  tei-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:86-1.9.4
+    profiles: ["models"]
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - "--model-id=${RERANK_MODEL_ID:-BAAI/bge-reranker-v2-m3}"
+      # Rerank batches are small and bounded (a few dozen candidates), so this
+      # is kept low to leave VRAM for generation.
+      - "--max-client-batch-size=32"
+      - "--auto-truncate"
+    environment:
+      HUGGINGFACE_HUB_CACHE: /data
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - hf_cache:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              capabilities: ["gpu"]
+              device_ids: ["nvidia.com/gpu=0"]
+
+  # Generation. See risk R1: this model is hybrid Gated DeltaNet + MoE and
+  # llama.cpp's support for that architecture is young, so it is smoke-tested
+  # for coherence before anything is built on it.
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b11206
+    # Pinned to a build tag, not the floating `server-cuda`: llama.cpp ships
+    # several builds an hour, and the floating tag resolves to a different
+    # digest again. b11206 is the highest server-cuda image published.
+    profiles: ["models"]
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      # Flag and value are SEPARATE tokens, never --flag=value: llama.cpp's
+      # argument parser normalises underscores to hyphens across the whole
+      # token, so `--model=...Q4_K_XL.gguf` arrives as `...Q4-K-XL.gguf` and
+      # the server dies on a file that does not exist.
+      - "--model"
+      - "/models/${LLM_GGUF_FILE:-Qwen3.5-9B-UD-Q4_K_XL.gguf}"
+      # Binds loopback by default, which is unreachable from other containers.
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      # NEVER the model's native 262144. Reranked retrieval puts 6-10 sections
+      # into context, so 16k is ample, and the VRAM budget has no room for more.
+      - "--ctx-size"
+      - "${LLM_CTX_SIZE:-16384}"
+      - "--n-gpu-layers"
+      - "999"
+      # Buys back roughly a gigabyte of KV cache at this context length.
+      - "--cache-type-k"
+      - "q8_0"
+      - "--cache-type-v"
+      - "q8_0"
+      - "--flash-attn"
+      - "auto"
+      # Qwen3.5 reasons by default. Left on, every answer arrives wrapped in
+      # <think> and latency multiplies -- neither of which suits a consultant
+      # that must quote retrieved text. (--chat-template-kwargs still works but
+      # the server deprecates it in favour of this.)
+      - "--reasoning"
+      - "off"
+    environment:
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # Read-only: the server has no business writing to the weights.
+      - models:/models:ro
+    networks:
+      - backend
+    healthcheck:
+      # `sh` here is dash, which has no /dev/tcp, but curl is present.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              capabilities: ["gpu"]
+              device_ids: ["nvidia.com/gpu=0"]
+
 networks:
   # Corpus, models and identity. Not marked `internal` because the pipeline
   # fetches from CORDIS and the model servers pull weights from HuggingFace.
