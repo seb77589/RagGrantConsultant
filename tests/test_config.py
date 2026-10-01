@@ -3,31 +3,43 @@
 `DATABASE_URL` is the only environment variable in the codebase, so the two
 things worth pinning are that it is read from the environment at all and that
 the default works without one.
+
+These tests must pass both on the host and inside the pipeline container, where
+compose sets DATABASE_URL to the in-network form. Asserting on the ambient value
+would therefore pass in one place and fail in the other, so each test states the
+environment it wants.
 """
 
 from __future__ import annotations
 
 import importlib
 
+import pytest
+
 from gcr import config
 
 
-def test_database_url_defaults_to_published_loopback_port() -> None:
+@pytest.fixture(autouse=True)
+def _restore_config():
+    """Reload the module after each test, so a reload here cannot leak into the
+    rest of the suite. Runs after monkeypatch has undone its own changes."""
+    yield
+    importlib.reload(config)
+
+
+def test_database_url_defaults_to_published_loopback_port(monkeypatch) -> None:
     """With no environment set, a host-side run reaches compose's published port."""
-    assert config.DATABASE_URL.startswith("postgresql://")
-    assert "127.0.0.1:5432" in config.DATABASE_URL
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    reloaded = importlib.reload(config)
+    assert reloaded.DATABASE_URL.startswith("postgresql://")
+    assert "127.0.0.1:5432" in reloaded.DATABASE_URL
 
 
 def test_database_url_comes_from_the_environment(monkeypatch) -> None:
     """Compose sets the in-network form; the module must honour it."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://gcr:pw@db:5432/gcr")
     reloaded = importlib.reload(config)
-    try:
-        assert reloaded.DATABASE_URL == "postgresql://gcr:pw@db:5432/gcr"
-    finally:
-        # Other tests import this module; leave it as they expect to find it.
-        monkeypatch.delenv("DATABASE_URL")
-        importlib.reload(config)
+    assert reloaded.DATABASE_URL == "postgresql://gcr:pw@db:5432/gcr"
 
 
 def test_the_two_tiers_are_distinct_tables() -> None:

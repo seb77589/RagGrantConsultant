@@ -70,6 +70,59 @@ services:
     networks:
       - backend
 
+  # ---------------------------------------------------------------------
+  # Ingestion pipeline (plan phase 3). Run-on-demand, not a long-lived
+  # service -- it has no server to keep up:
+  #
+  #   docker compose run --rm pipeline gcr sections horizon
+  #   docker compose run --rm --entrypoint pytest pipeline -q
+  #
+  # PIPELINE_TARGET=embed switches to the CUDA build for the embedding pass.
+  # ---------------------------------------------------------------------
+  pipeline:
+    build:
+      context: .
+      dockerfile: containers/pipeline/Containerfile
+      target: ${PIPELINE_TARGET:-base}
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: gcr-pipeline:${PIPELINE_TARGET:-base}
+    profiles: ["tools"]
+    logging: *default-logging
+    environment:
+      # The in-network form. config.py defaults to the published loopback port
+      # instead, so a host-side `uv run` needs no setup.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      HF_HOME: /opt/hf
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # Must be /app/data, not /data: config.py derives paths from REPO_ROOT
+      # (= /app) and fetch.py stores them relative to it, raising ValueError
+      # for any destination outside it.
+      - ./data:/app/data
+      # Live code, so an edit on the host takes effect without a rebuild. The
+      # editable install points at /app/src, so this shadows it correctly.
+      - ./src:/app/src
+      - ./tests:/app/tests
+      # Shared with the model servers, so bge-m3 is downloaded once.
+      - hf_cache:/opt/hf
+    networks:
+      - backend
+    # No depends_on: fetch, sections, manifest, pytest and ruff need no
+    # database, and naming a dependency in another profile would force the
+    # `core` profile on for all of them.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # `capabilities` is required alongside `driver: cdi` -- Compose
+            # rejects the reservation without it. Harmless on the CPU-only
+            # base target; needed by the embed target.
+            - driver: cdi
+              capabilities: ["gpu"]
+              device_ids: ["nvidia.com/gpu=0"]
+
 networks:
   # Corpus, models and identity. Not marked `internal` because the pipeline
   # fetches from CORDIS and the model servers pull weights from HuggingFace.

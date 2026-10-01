@@ -57,8 +57,23 @@ def sections(
     dataset: Annotated[str, typer.Argument()] = "horizon",
     limit: Annotated[int, typer.Option(help="stop after N projects (0 = all)")] = 0,
     out: Annotated[Path | None, typer.Option(help="write sections as JSONL")] = None,
+    allow_token_heuristic: Annotated[
+        bool,
+        typer.Option(
+            "--allow-token-heuristic",
+            help="count tokens by character estimate when the bge-m3 tokenizer is absent; "
+            "produces a different corpus, so never use it for output that will be embedded",
+        ),
+    ] = False,
 ) -> None:
     """Build sections and report the corpus profile."""
+    from .chunking import require_real_tokenizer, tokenizer_name
+
+    # Before any work: the tokenizer decides chunk boundaries, so getting this
+    # wrong changes the corpus rather than merely the reported counts.
+    if not allow_token_heuristic:
+        require_real_tokenizer()
+
     spec = cordis.DATASETS[dataset]
     zip_path = config.DATA_RAW / "cordis" / str(spec["url"]).rsplit("/", 1)[-1]
     if not zip_path.exists():
@@ -91,6 +106,10 @@ def sections(
         if handle:
             handle.close()
 
+    # Recorded in the profile so a pasted run is self-describing: two runs that
+    # disagree on section count are explained by this line before anything else.
+    typer.echo(f"token counter       : {tokenizer_name()}")
+    typer.echo(f"chunking version    : {config.CHUNKING_VERSION}")
     typer.echo(f"sections            : {n:,}")
     typer.echo(f"tokens              : {tokens:,}")
     typer.echo(f"mean tokens/section : {tokens / n:.0f}" if n else "mean tokens/section : n/a")

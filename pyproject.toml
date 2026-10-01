@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The real bge-m3 tokenizer, without the GPU stack. Chunk boundaries depend on
+# it: the character fallback over-estimates by ~17% and so builds a different
+# corpus. transformers pulls in `tokenizers` but not torch, so this stays small
+# enough to belong in every image that builds sections.
+tokenize = [
+    "transformers>=4.44",
+]
 # Heavy GPU stack, installed separately: uv sync --extra embed
 embed = [
     "torch>=2.4",

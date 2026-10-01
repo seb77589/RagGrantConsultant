@@ -44,8 +44,8 @@ This file links to them rather than duplicating them.
 |---|---|---|---|---|
 | 0 | Preflight and baseline | **done** | 2026-10-01 | `b703ba8` |
 | 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | `48607dc` |
-| 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | |
-| 3 | Pipeline image | not started | | |
+| 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | `35da3b1` |
+| 3 | Pipeline image | **done** | 2026-10-01 | |
 | 4 | Parity gate | not started | | |
 | 5 | Model tier (embed, rerank, generate) | not started | | |
 | 6 | Load, index, and the blocked measurements | not started | | |
@@ -120,7 +120,7 @@ GrantConsultantRAG/
 ├── compose.proof.yaml            # overlay: second DB for the migration proof
 ├── .env.example                  # committed; .env is gitignored
 ├── containers/
-│   ├── pipeline/Containerfile    # python:3.12-slim + uv + editable install
+│   ├── pipeline/Containerfile    # python:3.12-slim + uv + editable install, base/embed targets
 │   ├── caddy/Caddyfile
 │   ├── authelia/configuration.yml.example
 │   ├── lldap/lldap_config.toml.example
@@ -360,21 +360,31 @@ plan's earlier figure of 32 was wrong), `ruff check` clean.
 
 ## Phase 3 — Pipeline image
 
-- [ ] **3.1 Write `containers/pipeline/Containerfile`** — `python:3.12-slim`, `uv`, project at
-      `/app`, **editable** install, `HF_HOME` on `gcr_hf_cache`, and a non-root user whose UID matches
-      the host so `./data` writes are not root-owned.
-- [ ] **3.2 Two build targets** — `base` (core deps, CPU, fast) and `embed` (adds the `embed` extra,
-      CUDA). Keeping the ~2.5 GB torch layer out of the default target keeps the dev loop quick.
-- [ ] **3.3 Add the `pipeline` service** — binds `./data:/app/data` and `./src:/app/src`, GPU on the
-      `embed` target, entrypoint `gcr`.
+- [x] **3.1 Write `containers/pipeline/Containerfile`** — `python:3.12-slim-trixie`, `uv` pinned to
+      **0.11.11** (the version that generated the committed `uv.lock`, revision 3), project at `/app`,
+      **editable** install, `HF_HOME=/opt/hf` on `gcr_hf_cache`, and a non-root user built from
+      `HOST_UID`/`HOST_GID` build args.
+- [x] **3.2 Two build targets** — `base` and `embed`. **`base` had to change from the plan**: it now
+      installs a new `tokenize` extra (transformers without torch, a few MB) because the real bge-m3
+      tokenizer turned out to be load-bearing for chunk boundaries, not just for reporting. See the
+      run log.
+- [x] **3.3 Add the `pipeline` service** — binds `./data:/app/data`, `./src:/app/src`, `./tests`,
+      shares `hf_cache` with the model servers. No `depends_on`: `fetch`, `sections`, `manifest`,
+      `pytest` and `ruff` need no database, and naming a dependency in another profile would force
+      the `core` profile on for all of them.
 
-**Validation**
+**Validation** — run, passed:
 
 ```bash
-docker compose run --rm pipeline gcr --help          # lists fetch, sections, benchmark-embed, manifest
-docker compose run --rm pipeline pytest              # full suite passes inside the container
-docker compose run --rm pipeline ruff check src tests
+docker compose --profile tools run --rm pipeline gcr --help                   # all four commands
+docker compose --profile tools run --rm --entrypoint pytest pipeline -q       # 38 passed
+docker compose --profile tools run --rm --entrypoint ruff pipeline check src tests
 ```
+
+`REPO_ROOT` resolves to `/app` and `DATA_RAW` to `/app/data/raw`, confirming the editable install and
+the `/app/data` mount satisfy `fetch.py`'s `relative_to(REPO_ROOT)`. The container and the host now
+agree exactly on a sample slice — `gcr sections horizon --limit 100` gives **219 sections / 58,935
+tokens / 18 countries** in both.
 
 ---
 
@@ -546,7 +556,7 @@ The stack is proven when all of these hold:
    everything to healthy from a clean machine.
 2. `docker compose run --rm pipeline gcr sections horizon` reproduces **exactly 50,940 sections**
    with identical IDs.
-3. `docker compose run --rm pipeline pytest` passes inside the container (33 tests).
+3. `docker compose run --rm pipeline pytest` passes inside the container (38 tests).
 4. A hybrid retrieval query returns ranked sections with source identifiers and dates attached.
 5. An unauthenticated browser request is redirected to the Authelia portal; an authenticated one is
    served; and a restricted-tier row is withheld from a user outside its group.
@@ -637,3 +647,41 @@ for the cap decision. It lives in `containers/db/hnsw.sql` instead.
 
 Host test suite is **33 passed**, not the 32 the plan claimed — it was 29 before this phase and
 `tests/test_config.py` added four.
+
+### 2026-10-01 — Phase 3 complete, and the most important finding so far
+
+The pipeline image works, but building it surfaced a defect that would have invalidated everything
+downstream had Phase 4 not been designed to catch it.
+
+**The container was silently building a different corpus from the host.** The first image had core
+dependencies only, so `transformers` was absent, so `chunking._hf_tokenizer()` returned `None`, so
+`count_tokens` fell back to the 4-characters-per-token heuristic — which `CLAUDE.md` records as
+over-estimating by about 17%. The same sentence counted **9 tokens on the host and 10 in the
+container**. Since token counts decide where chunks are cut, the container would have produced a
+different number of sections, with different boundaries, and reported success while doing it. One
+pre-existing chunking test (`test_tail_is_not_merged_when_it_would_breach_the_ceiling`) failed in the
+container and passed on the host, which is what exposed it.
+
+The fallback was deliberate and is documented in `chunking.py` as "degrade, not abort" — reasonable
+for tests and lint, which must run without the GPU stack. It is not reasonable for a corpus that will
+be embedded, compared, or cited. Three changes:
+
+1. **New `tokenize` extra** in `pyproject.toml` — `transformers` *without* torch, a few MB rather
+   than 2.5 GB. The base image installs it, so every image that can build sections has the real
+   tokenizer.
+2. **`chunking.require_real_tokenizer()`** turns the silent fallback into a loud error naming the fix,
+   and `gcr sections` calls it before doing any work. `--allow-token-heuristic` opts out for a rough
+   count that must never be embedded.
+3. **`gcr sections` now prints `token counter` and `chunking version`** in the corpus profile, so a
+   pasted run is self-describing and two runs that disagree on section count are explained by the
+   first line rather than investigated from scratch.
+
+`tests/test_tokenizer_guard.py` keeps the guard loud. The container now reports
+`tokenizer: XLMRobertaTokenizer`, `count_tokens = 9`, identical to the host.
+
+Smaller things: the `uv` image is pinned to 0.11.11 to match the `uv.lock` revision the host wrote;
+`uv pip install pytest ruff` must come *after* `uv sync`, because `uv sync` prunes anything absent
+from the lock; and `ARG` does not cross stage boundaries, so `HOST_UID`/`HOST_GID` are re-declared in
+the `embed` stage. A test of mine was also environment-sensitive — it asserted the `DATABASE_URL`
+default while compose sets that variable, so it passed on the host and failed in the container. It
+now states the environment it wants.
