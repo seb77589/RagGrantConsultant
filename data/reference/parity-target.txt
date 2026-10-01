@@ -1,4 +1,6 @@
 # Phase 4 parity target (pre-containerisation, host-produced)
+# STATUS 2026-10-01: MET. Container output is byte-identical to host output
+# (sha256 735fd73b0931...db033 for both). See docs/containerisation-plan.md.
 # Captured: 2026-10-01T07:40:34Z
 # Source: docs/measurements.md + data/interim/cordis-horizon-sections.jsonl
 

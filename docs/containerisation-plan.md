@@ -45,8 +45,8 @@ This file links to them rather than duplicating them.
 | 0 | Preflight and baseline | **done** | 2026-10-01 | `b703ba8` |
 | 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | `48607dc` |
 | 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | `35da3b1` |
-| 3 | Pipeline image | **done** | 2026-10-01 | |
-| 4 | Parity gate | not started | | |
+| 3 | Pipeline image | **done** | 2026-10-01 | `9606587` |
+| 4 | Parity gate | **done** | 2026-10-01 | |
 | 5 | Model tier (embed, rerank, generate) | not started | | |
 | 6 | Load, index, and the blocked measurements | not started | | |
 | 7 | Identity tier (LLDAP, Authelia) | not started | | |
@@ -393,20 +393,31 @@ tokens / 18 countries** in both.
 The step that makes everything after it trustworthy. If the container has silently altered the
 corpus, nothing downstream means anything.
 
-- [ ] **4.1 Build sections in the container** against the already-downloaded zip.
-- [ ] **4.2 Compare to the baseline** — exactly **50,940 sections** and **13,520,730 tokens**; diff
-      section IDs against the existing `data/interim/cordis-horizon-sections.jsonl`; country profile
-      unchanged.
-- [ ] **4.3 Re-run the embedding benchmark** in-container and compare to ~141 sections/s and 1.42 GB
-      peak VRAM.
-- [ ] **4.4 Confirm `gcr fetch` works in-container** — this exercises the `relative_to(REPO_ROOT)`
-      trap, which throws if the data mount is wrong.
+- [x] **4.1 Build sections in the container** — 50,940 sections in 71 s (host: 72 s).
+- [x] **4.2 Compare to the baseline** — exactly **50,940 sections**, **13,520,730 tokens**, 265 mean
+      tokens, 52 countries, 0 without country, 384 without date. Every figure matches.
+- [x] **4.3 Re-run the embedding benchmark** in-container — **142.5 sections/s** at batch 32 against
+      the host's 141.7, a 0.6% difference, and **peak VRAM 1.42 GB**, identical. Recorded in
+      `data/reference/embed_benchmark_container.json`. CUDA reaches the container through the CDI
+      reservation: torch 2.14.1+cu130 sees the RTX 3080 with 15.6 GB.
+- [x] **4.4 Confirm `gcr fetch` works in-container** — both paths exercised. The skip path (HEAD plus
+      manifest lookup) and, with `--force`, a real 36.9 MB download that goes through
+      `dest.relative_to(REPO_ROOT)`, the trap that throws when the data mount is wrong. The manifest
+      gained a correctly-formed record with `path` stored relative, the sha256 unchanged
+      (`1496a16e…`, so upstream has not moved and the corpus is unaffected), and the downloaded file
+      owned by `ninel:ninel` rather than root — confirming the UID mapping.
 
-**Validation**
+**Validation** — run, passed, at a stronger level than the plan required. The plan asked for matching
+counts and matching IDs. After the `fetch_date` fix below, host and container output is **identical
+byte for byte**:
 
-Identical section and token counts, and identical IDs. **If they differ, stop and diagnose** — do not
-proceed to embedding a corpus the container has changed. Throughput within ~15% is fine (container
-overhead, thermal state); a larger gap must be explained before Phase 6.
+```
+735fd73b093117c377257299020ccc574b45943fd3a7db5b39602a4b373db033  parity-host.jsonl
+735fd73b093117c377257299020ccc574b45943fd3a7db5b39602a4b373db033  parity-container.jsonl
+```
+
+Section IDs, text and token counts are also identical to the pre-containerisation baseline artefact
+`data/interim/cordis-horizon-sections.jsonl`, row for row across all 50,940.
 
 ---
 
@@ -685,3 +696,32 @@ from the lock; and `ARG` does not cross stage boundaries, so `HOST_UID`/`HOST_GI
 the `embed` stage. A test of mine was also environment-sensitive — it asserted the `DATABASE_URL`
 default while compose sets that variable, so it passed on the host and failed in the container. It
 now states the environment it wants.
+
+### 2026-10-01 — Phase 4 complete: parity proven, and a second data-integrity bug found
+
+The container reproduces the host corpus **byte for byte** — same sha256 over all 50,940 rows — and
+embeds at 142.5 sections/s against the host's 141.7 with identical 1.42 GB peak VRAM. Everything
+downstream can be trusted to be operating on the same corpus.
+
+Getting there turned up a second defect, and this one was invisible to the counts.
+
+**`fetch_date` recorded when sections were built, not when the source was fetched.** The first parity
+run matched on every section ID and every character of text, yet the files differed — the only
+divergent field, in all 50,940 rows, was `source.fetch_date`. `gcr sections` never passed a
+`fetch_date` to `iter_sections`, so it defaulted to `datetime.now(UTC)`.
+
+That is not cosmetic. `CLAUDE.md` makes fetch date sacred because it drives "as of" dates and
+staleness warnings, so **a corpus rebuilt today from a two-year-old download would have reported
+itself as fresh** — and the migration-equivalence proof in Phase 10 would have shown a difference on
+every row for a reason that has nothing to do with migrating. The manifest already held the true
+date, so `gcr sections` now reads it from there via `_source_fetch_date()`, falling back to `now()`
+only when no record exists, which is the honest answer when there is no evidence of an earlier fetch.
+`tests/test_fetch_date.py` covers all three cases.
+
+Worth noting what caught it: not the section counts, which were already exact, but the decision to
+compare file hashes rather than stop at "50,940 = 50,940". A parity gate that only counts rows would
+have passed this straight through.
+
+One consequence to be aware of: step 4.4 ran `gcr fetch --force`, so the manifest now has a second
+record and later `sections` runs will carry that newer `fetch_date`. The payload sha256 is unchanged,
+so the corpus text is unaffected.

@@ -52,6 +52,20 @@ def fetch(
     typer.echo(f"upstream last-modified: {record.upstream_last_modified}")
 
 
+def _source_fetch_date(url: str):
+    """When the payload behind `url` was actually downloaded, per the manifest.
+
+    Returns None when the manifest has no record, which leaves the adapter's
+    own `datetime.now(UTC)` default in place -- the only honest answer when we
+    have no evidence of an earlier fetch.
+    """
+    from .manifest import latest_for
+    from .sources.cordis import SOURCE_SYSTEM
+
+    record = latest_for(SOURCE_SYSTEM, url)
+    return record.fetch_date if record else None
+
+
 @app.command()
 def sections(
     dataset: Annotated[str, typer.Argument()] = "horizon",
@@ -79,6 +93,13 @@ def sections(
     if not zip_path.exists():
         raise typer.BadParameter(f"{zip_path} not found; run: gcr fetch {dataset}")
 
+    # fetch_date means "when we retrieved the source", which drives "as of"
+    # dates and staleness warnings. It is NOT when sections were built: a
+    # corpus rebuilt today from a two-year-old download is two years stale, and
+    # defaulting to now() would report it as fresh. The manifest holds the real
+    # date, so take it from there and fall back only when there is no record.
+    fetched = _source_fetch_date(str(spec["url"]))
+
     n = 0
     tokens = 0
     by_origin: dict[str, int] = {}
@@ -90,7 +111,9 @@ def sections(
     handle = out.open("w", encoding="utf-8") if out else None
 
     try:
-        for s in cordis.iter_sections(zip_path, dataset=dataset, limit=limit or None):
+        for s in cordis.iter_sections(
+            zip_path, dataset=dataset, limit=limit or None, fetch_date=fetched
+        ):
             n += 1
             tokens += s.token_count
             by_origin[s.origin.value] = by_origin.get(s.origin.value, 0) + 1
