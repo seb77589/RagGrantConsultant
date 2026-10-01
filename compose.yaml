@@ -281,6 +281,93 @@ services:
               capabilities: ["gpu"]
               device_ids: ["nvidia.com/gpu=0"]
 
+  # ---------------------------------------------------------------------
+  # Identity (plan phase 7) and edge (phase 8).
+  # ---------------------------------------------------------------------
+
+  lldap:
+    image: lldap/lldap:v0.6.3
+    profiles: ["auth"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      # The *_FILE forms take precedence over the plain variables and keep the
+      # values out of `docker inspect` and the process environment.
+      LLDAP_JWT_SECRET_FILE: /run/secrets/lldap_jwt_secret
+      LLDAP_KEY_SEED_FILE: /run/secrets/lldap_key_seed
+      LLDAP_LDAP_USER_PASS_FILE: /run/secrets/ldap_admin_password
+      LLDAP_LDAP_BASE_DN: "dc=gcr,dc=local"
+      LLDAP_DATABASE_URL: "sqlite:///data/users.db?mode=rwc"
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - lldap_data:/data
+      - ./secrets:/run/secrets:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  authelia:
+    image: ghcr.io/authelia/authelia:4.39.28
+    profiles: ["auth"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      X_AUTHELIA_CONFIG: /config/configuration.yml
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /run/secrets/authelia_jwt_secret
+      AUTHELIA_SESSION_SECRET_FILE: /run/secrets/authelia_session_secret
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/authelia_storage_encryption_key
+      AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE: /run/secrets/ldap_admin_password
+      AUTHELIA_STORAGE_POSTGRES_PASSWORD: ${AUTHELIA_DB_PASSWORD:?set in .env}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # Read-only. Authelia runs as root, and a writable bind mount here let it
+      # chown the repository's own config directory to root.
+      - ./containers/authelia:/config:ro
+      - authelia_data:/var/lib/authelia
+      - ./secrets:/run/secrets:ro
+    networks:
+      # Both networks: it must reach LLDAP and PostgreSQL on the backend, and
+      # be reachable by Caddy on the edge.
+      - backend
+      - edge
+    depends_on:
+      lldap:
+        condition: service_healthy
+    # No healthcheck override: the image ships its own (/app/healthcheck.sh),
+    # and 4.39 has no `authelia health` subcommand to call instead. Writing one
+    # here only replaced a working check with a broken one.
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    profiles: ["edge"]
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./containers/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./containers/caddy/site:/srv:ro
+      # /data holds the local CA. It must be a named volume, or the CA is
+      # regenerated on every recreate and has to be re-trusted each time.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      # Edge only: the reverse proxy has no route to the database or the model
+      # servers, so a compromise there cannot reach the corpus directly.
+      - edge
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 networks:
   # Corpus, models and identity. Not marked `internal` because the pipeline
   # fetches from CORDIS and the model servers pull weights from HuggingFace.
@@ -297,5 +384,6 @@ volumes:
   hf_cache:
   models:
   lldap_data:
+  authelia_data:
   caddy_data:
   caddy_config:

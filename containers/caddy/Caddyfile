@@ -1,0 +1,62 @@
+# Caddy: the only service that publishes a port.
+#
+# Everything else talks over the compose network, which is what makes putting
+# Authelia in front meaningful rather than decorative.
+
+{
+	# No ACME account is needed: every host here is *.localhost, which Caddy
+	# serves from its own local CA.
+	local_certs
+	admin off
+
+	# Caddy sits behind nothing here, but the Docker bridge still appears as a
+	# proxy hop. Declaring the private ranges trusted keeps Caddy's view of the
+	# client IP and Authelia's agreeing; a mismatch is what makes
+	# identity-header spoofing possible. This is a GLOBAL option -- inside a
+	# site block Caddy rejects it as an unrecognized directive.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+grants.localhost {
+	# `tls internal` is implied for *.localhost, but stating it means the file
+	# still does the right thing if the hostname ever changes.
+	tls internal
+
+	encode zstd gzip
+
+	# --- The login portal itself -------------------------------------------
+	# Must be reachable without authentication, or there is nowhere to log in.
+	handle /authelia/* {
+		reverse_proxy authelia:9091
+	}
+
+	# --- Public attribution -------------------------------------------------
+	# CLAUDE.md requires crediting "© European Union" with source links and
+	# stating that text was chunked and extracted, plus the independence
+	# disclaimer. None of that belongs behind a login.
+	handle /about* {
+		root * /srv
+		rewrite * /about.html
+		file_server
+	}
+
+	# --- Everything else ----------------------------------------------------
+	handle {
+		forward_auth authelia:9091 {
+			uri /authelia/api/authz/forward-auth
+			# The identity the application reads. Access filtering is applied
+			# in SQL from Remote-Groups; it is never left to a prompt.
+			copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+		}
+
+		root * /srv
+		file_server browse
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

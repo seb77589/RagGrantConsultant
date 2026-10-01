@@ -1,0 +1,151 @@
+# Authelia configuration template.
+#
+# Copy to configuration.yml, which is gitignored. No secrets belong in this
+# file: every one is supplied through an AUTHELIA_*_FILE environment variable
+# in compose.yaml, reading from secrets/. That is the method Authelia documents
+# as preferred, and it keeps the committed template safe to read.
+
+theme: light
+
+server:
+  # Served under /authelia on the same host as the application, rather than on
+  # its own subdomain. Session cookies then need no cross-subdomain scope,
+  # which browsers handle inconsistently for *.localhost.
+  address: 'tcp://0.0.0.0:9091/authelia'
+
+  endpoints:
+    authz:
+      # Must match the `uri` in Caddy's forward_auth block. A mismatch here
+      # does not fail loudly -- it 404s the authorisation request, and the
+      # proxy then has to decide what to do with an answer it did not get.
+      forward-auth:
+        implementation: 'ForwardAuth'
+
+log:
+  level: 'info'
+  format: 'text'
+
+# ---------------------------------------------------------------------------
+# Who may sign in
+# ---------------------------------------------------------------------------
+
+authentication_backend:
+  password_reset:
+    disable: true
+  refresh_interval: '1m'
+  ldap:
+    address: 'ldap://lldap:3890'
+    # LLDAP ships a known schema, so Authelia's `lldap` implementation sets the
+    # attribute names and filters correctly without hand-written LDAP filters.
+    implementation: 'lldap'
+    base_dn: 'dc=gcr,dc=local'
+    additional_users_dn: 'ou=people'
+    additional_groups_dn: 'ou=groups'
+    user: 'uid=admin,ou=people,dc=gcr,dc=local'
+    # password: supplied via AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE
+
+# ---------------------------------------------------------------------------
+# What they may reach
+# ---------------------------------------------------------------------------
+
+access_control:
+  # Deny by default. Every rule below is an explicit grant, so a new route is
+  # unreachable until someone decides who may reach it.
+  default_policy: 'deny'
+  rules:
+    # The portal and its assets must be reachable unauthenticated, or there is
+    # nowhere to log in.
+    - domain: 'grants.localhost'
+      resources:
+        - '^/authelia/.*$'
+      policy: 'bypass'
+
+    # Public attribution and disclaimer. CLAUDE.md requires an "About the data"
+    # page crediting the European Union; it is of no use behind a login.
+    - domain: 'grants.localhost'
+      resources:
+        - '^/about.*$'
+      policy: 'bypass'
+
+    # The restricted tier -- machine-translated content and anything else
+    # labelled for internal use. Maps to the `restricted` access_group column
+    # in the sections tables.
+    - domain: 'grants.localhost'
+      resources:
+        - '^/restricted.*$'
+      subject:
+        - 'group:restricted'
+      policy: 'one_factor'
+
+    # Then deny everyone else, explicitly, BEFORE the catch-all below.
+    #
+    # This rule is not redundant, and omitting it is a live information leak.
+    # Authelia takes the FIRST matching rule, and a `subject:` constraint does
+    # not deny a non-member -- it simply fails to match them. The request then
+    # falls through to the broader consultants rule underneath, which has no
+    # `resources:` constraint and so grants /restricted to any consultant.
+    # Measured before this rule existed: a user in `consultants` but not in
+    # `restricted` received HTTP 200 on /restricted.
+    - domain: 'grants.localhost'
+      resources:
+        - '^/restricted.*$'
+      policy: 'deny'
+
+    # Everything else: any authenticated member of the consultant group.
+    - domain: 'grants.localhost'
+      subject:
+        - 'group:consultants'
+      policy: 'one_factor'
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+session:
+  name: 'authelia_session'
+  # secret: supplied via AUTHELIA_SESSION_SECRET_FILE
+  expiration: '12h'
+  inactivity: '45m'
+  remember_me: '1M'
+  cookies:
+    - domain: 'grants.localhost'
+      authelia_url: 'https://grants.localhost/authelia'
+      default_redirection_url: 'https://grants.localhost/'
+
+regulation:
+  max_retries: 5
+  find_time: '2m'
+  ban_time: '5m'
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+storage:
+  # encryption_key: supplied via AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
+  postgres:
+    # The same instance as the corpus, but a separate database and a separate
+    # role: one fewer container and one backup target, without letting either
+    # side read the other. The accepted cost is that a PostgreSQL restart ends
+    # everyone's session.
+    address: 'tcp://db:5432'
+    database: 'authelia'
+    schema: 'public'
+    username: 'authelia'
+    # password: supplied via AUTHELIA_STORAGE_POSTGRES_PASSWORD_FILE
+
+notifier:
+  # No mail server in this stack. Password reset is disabled above, so the
+  # only notifications are rare and a file is the honest place for them.
+  #
+  # Written to a named volume, not to /config. The config directory is mounted
+  # read-only: Authelia runs as root, and a writable bind mount let it take
+  # ownership of the repository's own files.
+  disable_startup_check: true
+  filesystem:
+    filename: '/var/lib/authelia/notification.txt'
+
+identity_validation:
+  reset_password:
+    # jwt_secret: via AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE
+    jwt_lifespan: '5m'

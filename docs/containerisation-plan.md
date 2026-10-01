@@ -49,9 +49,9 @@ This file links to them rather than duplicating them.
 | 4 | Parity gate | **done** | 2026-10-01 | `78c3964` |
 | 5 | Model tier (embed, rerank, generate) | **done** | 2026-10-01 | `0da4802` |
 | 6 | Load, index, and the blocked measurements | **done** | 2026-10-01 | |
-| 7 | Identity tier (LLDAP, Authelia) | not started | | |
-| 8 | Edge (Caddy, forward auth, TLS) | not started | | |
-| 9 | Group-to-row-level access | not started | | |
+| 7 | Identity tier (LLDAP, Authelia) | **done** | 2026-10-01 | |
+| 8 | Edge (Caddy, forward auth, TLS) | **done** | 2026-10-01 | |
+| 9 | Group-to-row-level access | **done** | 2026-10-01 | |
 | 10 | Migration-equivalence proof | not started | | |
 | 11 | Cleanliness audit and resumability | not started | | |
 
@@ -177,7 +177,7 @@ settled.
 |---|---|---|
 | R1 | Qwen3.5-9B on llama.cpp | **closed in 5.0** — coherent on sm_86 at 16k ctx |
 | R2 | VRAM has no grace | **closed in 5.5** — 8.5 GB of 16, 7.2 GB spare |
-| R3 | Caddy local CA needs manual trust | **open** |
+| R3 | Caddy local CA needs manual trust | **confirmed in 8.4** — runbook step written |
 | R4 | Docker 29 containerd image store | **confirmed, benign here** — see below |
 | R5 | Healthcheck false-negatives on first start | **hit, and fixed** — see below |
 | R6 | Compose CDI needs `capabilities: [gpu]` | **closed in 0.2** — see below |
@@ -491,50 +491,72 @@ constraint is disk, at roughly 16 GB per million sections against 374 GB free.
 
 ## Phase 7 — Identity tier
 
-- [ ] **7.1 `lldap`** with a bootstrap admin and the groups that map to access tiers, including the
+- [x] **7.1 `lldap`** with a bootstrap admin and the groups that map to access tiers, including the
       restricted tier the Kohesio rule requires for translated content. SQLite on a named volume —
       LLDAP supports Postgres, but its dataset is a handful of users, and SQLite avoids making the
       login chain depend on Postgres start-up ordering.
-- [ ] **7.2 `authelia`** with the LDAP backend and `_FILE` secrets, storing state in a **separate
+- [x] **7.2 `authelia`** with the LDAP backend and `_FILE` secrets, storing state in a **separate
       `authelia` database and role on the same instance** — one less container, one backup target.
       Accepted cost: a Postgres restart logs everyone out mid-session.
-- [ ] **7.3 Commit `*.example` templates only**; the real configs are gitignored already.
+- [x] **7.3 Commit `*.example` templates only**; the real configs are gitignored already.
 
-**Validation**
+**Validation** — run, passed. Authelia migrated its schema into the shared PostgreSQL instance
+(schema 0 → 29) on first start, confirming the separate-database design. A test user authenticates
+through Authelia against LLDAP and the forwarded identity is correct:
 
-A test user authenticates against LLDAP through Authelia, and group membership is visible in the
-forwarded headers.
+```
+Remote-User: alice     Remote-Groups: consultants
+Remote-User: bob       Remote-Groups: consultants,restricted
+```
+
+Groups are created idempotently by `containers/bootstrap-identity.sh`, which also sets passwords.
 
 ---
 
 ## Phase 8 — Edge
 
-- [ ] **8.1 `caddy`** with a `Caddyfile` for `grants.localhost`, `tls internal`, `/data` on a named
+- [x] **8.1 `caddy`** with a `Caddyfile` for `grants.localhost`, `tls internal`, `/data` on a named
       volume.
-- [ ] **8.2 `forward_auth`** to Authelia:
+- [x] **8.2 `forward_auth`** to Authelia:
       `forward_auth authelia:9091 { uri /api/authz/forward-auth; copy_headers Remote-User Remote-Groups Remote-Email Remote-Name }`
-- [ ] **8.3 Set `trusted_proxies` and Authelia's `server.endpoints.authz` consistently** — on a
+- [x] **8.3 Set `trusted_proxies` and Authelia's `server.endpoints.authz` consistently** — on a
       Docker bridge network a mismatch makes identity-header spoofing live.
-- [ ] **8.4 Extract and trust the local CA (R3)**, and write the browser-import step into the runbook.
-- [ ] **8.5 Confirm no service except Caddy publishes a port.**
+- [x] **8.4 Extract and trust the local CA (R3)**, and write the browser-import step into the runbook.
+- [x] **8.5 Confirm no service except Caddy publishes a port.**
 
-**Validation**
+**Validation** — run, passed:
 
-An unauthenticated request is redirected to the portal; an authenticated one passes through with
-identity headers; `ss -ltnp` shows only Caddy's ports plus the dev-only loopback Postgres port.
+| Request | Result |
+|---|---|
+| unauthenticated `GET /` | **302** to `/authelia/?rd=…`, the login portal |
+| unauthenticated `GET /about` | **200**, showing "© European Union" — public by design |
+| unauthenticated `GET /authelia/` | **200**, or there would be nowhere to log in |
+| authenticated `GET /` | **200**, with `Remote-User` / `Remote-Groups` forwarded |
+| alice (consultants) `GET /restricted/x` | **403** |
+| bob (consultants, restricted) `GET /restricted/x` | **200** |
+
+Caddy obtained a certificate from its own local CA for `grants.localhost`.
 
 ---
 
 ## Phase 9 — Group-to-row-level access
 
-- [ ] **9.1 Map Authelia/LLDAP groups** to the `access_group` column added in 2.3.
-- [ ] **9.2 Enforce the filter in the query path, not in the prompt.** A model instruction is not an
+- [x] **9.1 Map Authelia/LLDAP groups** to the `access_group` column added in 2.3.
+- [x] **9.2 Enforce the filter in the query path, not in the prompt.** A model instruction is not an
       access control.
 
-**Validation**
+**Validation** — run, passed. A restricted-tier row was inserted, then queried as each group, in
+every retrieval mode. Verified by querying, not by asking the model:
 
-A user outside the restricted group cannot retrieve a restricted-tier row — verified by querying as
-that user, not by asking the model.
+| Retrieval mode | `groups=[public]` | `groups=[public, restricted]` |
+|---|---|---|
+| full-text | withheld | visible |
+| vector | withheld | visible |
+| hybrid | withheld | visible |
+
+And the default is closed: with **no groups supplied at all**, the restricted row is withheld rather
+than everything being returned. `tests/test_access_filter.py` covers the clause builder (7 tests,
+no database needed) so this cannot regress silently.
 
 ---
 
@@ -814,3 +836,45 @@ Also added this phase, because Phase 6 could not run without them: `psycopg` as 
 `load`, `build-index` and `search` CLI commands. Hybrid merging uses reciprocal rank fusion rather
 than a weighted score sum, because `ts_rank_cd` and cosine similarity are not on comparable scales
 and any fixed weighting between them would be a guess that quietly favours one half.
+
+### 2026-10-01 — Phases 7, 8 and 9 complete: the login chain, and an access-control leak
+
+LLDAP, Authelia and Caddy are up, the whole chain works, and `ss -ltnp` confirms the design holds:
+**only Caddy's 80 and 443 are published**, plus the dev-only loopback PostgreSQL port. Authelia
+migrated its schema into the shared PostgreSQL instance (0 → 29) on first start, so the
+separate-database-same-instance choice works as intended.
+
+**The important finding is an access-control leak that the obvious configuration contains.** Authelia
+applies the *first* matching rule, and a `subject:` constraint does not deny a non-member — it simply
+fails to match. So this, which reads correctly:
+
+```yaml
+- resources: ['^/restricted.*$']
+  subject: ['group:restricted']
+  policy: 'one_factor'
+- subject: ['group:consultants']       # catch-all, no `resources:`
+  policy: 'one_factor'
+```
+
+…grants `/restricted` to **any** consultant, because a non-member of `restricted` falls through to
+the catch-all. Measured: alice, in `consultants` only, received **HTTP 200** on `/restricted`. An
+explicit `policy: 'deny'` rule for the same resource, placed between the two, fixes it — alice now
+gets 403 and bob, who is in both groups, still gets 200. A rule that looks redundant is load-bearing.
+
+This is also the clearest argument for the belt-and-braces design: the HTTP layer decides whether a
+request reaches the application, and the SQL `access_group` filter decides which rows it may see.
+Phase 9 verified the second independently — a restricted row is withheld from `groups=[public]` in
+**all three** retrieval modes and returned for `groups=[public, restricted]`, and with no groups
+supplied at all the default is closed rather than open. Had only the HTTP rule existed, the leak
+above would have exposed restricted content.
+
+**A root container took ownership of repository files.** Authelia runs as root and `/config` was
+mounted read-write, so it chowned `containers/authelia/` to `root:root` and subsequent edits failed
+with `EACCES`. The mount is now `:ro`, with notifications redirected to a named volume. Worth
+remembering for any other config directory handed to a container that runs as root.
+
+**R3 confirmed as described.** Caddy issued its own certificate for `grants.localhost` but cannot
+install its root CA from inside a container. `containers/trust-local-ca.sh` extracts it and installs
+it into the system store; Firefox and Chrome on Linux keep separate stores and need a manual import,
+which the script prints. The CA is on the `gcr_caddy_data` volume and survives a recreate but not
+`down -v`.
