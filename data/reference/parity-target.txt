@@ -1,0 +1,19 @@
+# Phase 4 parity target (pre-containerisation, host-produced)
+# Captured: 2026-10-01T07:40:34Z
+# Source: docs/measurements.md + data/interim/cordis-horizon-sections.jsonl
+
+dataset                cordis horizon (HORIZON projects CSV bulk)
+zip sha256             1496a16ee79649d573a53697781b2fd950c18a5469c6a9f545f35dd5397771a7
+zip bytes              36908998
+projects               23613
+sections               50940
+tokens                 13520730
+mean tokens/section    265
+distinct countries     52
+missing update date    384  (0.75%)
+embed throughput       ~141 sections/s @ batch 32, fp16, cuda
+embed peak vram        1.42 GB @ batch 32
+
+# Integrity of the on-disk artefact the container output is diffed against:
+sections jsonl lines   50940
+sections jsonl sha256  d9217ad9d9cc178696c184a10b5928158737bf012066a9e40fe4aa6faeca0f57
