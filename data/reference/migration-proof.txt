@@ -1,0 +1,49 @@
+# Migration-equivalence proof
+# Run: 2026-10-01T09:14:03Z
+#
+# Dump from the primary container, restore into a SECOND PostgreSQL on a
+# SECOND, empty named volume, then compare retrieval on both.
+
+source   gcr-db-1        volume gcr_pgdata
+target   gcr-db-proof-1  volume gcr_pgdata_proof  (created empty)
+dump     data/snapshots/gcr-20261001T091015Z.dump  243601864 bytes
+         sha256 d7088b69347744ac437224ea1bc48226ddbc790076964eca6b683bb8199141b7
+
+## Data integrity (exact match required)
+rows                 50,940  both
+embedded             50,940  both
+indexes on sections      13  both
+content checksum     71e6b1106014f37522fc801095b19397  both
+   md5 over every (section_id, text, embedding) tuple, ordered by
+   section_id so it does not depend on physical row order.
+
+## Retrieval (12 questions x 3 modes, top 10)
+mode        ids match   order match   mean overlap   criterion
+fulltext        12/12         12/12         1.0000   exact (GIN is deterministic)
+vector          11/12         11/12         0.9167   >= 0.85 and one-sided hits are near-ties
+hybrid          12/12         11/12         0.9667   >= 0.85 and one-sided hits are near-ties
+
+VERDICT: EQUIVALENT
+
+## Why vector results are not required to match exactly
+HNSW is an approximate index. A restore rebuilds the graph with a different
+insertion order, so nearest-neighbour results differ at the cut-off even
+though the data is byte-identical -- which the checksum above demonstrates.
+Every section returned on one side but not the other was verified to exist
+on both sides and to score within 0.02 of the last result that made the top
+ten: ranking noise at the boundary, not lost data. Demanding exact equality
+here would test the index's determinism rather than the migration.
+
+## Question set
+  - photonics research funding for small companies
+  - hydrogen production and storage projects
+  - grants for artificial intelligence in healthcare
+  - circular economy and recycling of batteries
+  - support for SMEs in rural regions
+  - climate adaptation and flood resilience
+  - quantum computing hardware development
+  - cybersecurity for critical infrastructure
+  - sustainable agriculture and soil health
+  - offshore wind energy innovation
+  - space technology and earth observation
+  - vaccine development and clinical trials

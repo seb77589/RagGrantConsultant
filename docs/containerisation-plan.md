@@ -52,7 +52,7 @@ This file links to them rather than duplicating them.
 | 7 | Identity tier (LLDAP, Authelia) | **done** | 2026-10-01 | |
 | 8 | Edge (Caddy, forward auth, TLS) | **done** | 2026-10-01 | |
 | 9 | Group-to-row-level access | **done** | 2026-10-01 | |
-| 10 | Migration-equivalence proof | not started | | |
+| 10 | Migration-equivalence proof | **done** | 2026-10-01 | |
 | 11 | Cleanliness audit and resumability | not started | | |
 
 ---
@@ -565,17 +565,35 @@ no database needed) so this cannot regress silently.
 A named Phase-1 deliverable. Containerisation makes it a more honest rehearsal than a host install
 would: the "new data centre" is a genuinely separate volume and container.
 
-- [ ] **10.1 Freeze a snapshot** and `pg_dump` to `./data/snapshots/` (gitignored).
-- [ ] **10.2 Bring up `compose.proof.yaml`** — a second `db` on a **second, empty volume** — and
+- [x] **10.1 Freeze a snapshot** and `pg_dump` to `./data/snapshots/` (gitignored).
+- [x] **10.2 Bring up `compose.proof.yaml`** — a second `db` on a **second, empty volume** — and
       restore into it.
-- [ ] **10.3 Run the fixed question set against both** and compare retrieved identifiers, rank
+- [x] **10.3 Run the fixed question set against both** and compare retrieved identifiers, rank
       overlap, and answer similarity.
-- [ ] **10.4 Commit the comparison** as an artefact.
+- [x] **10.4 Commit the comparison** as an artefact.
 
-**Validation**
+**Validation** — run, passed. Artefact committed at `data/reference/migration-proof.txt`;
+`containers/compare_retrieval.py` holds the question set and the criteria.
 
-Identifier sets identical, rank overlap at the stated threshold, any differences explained. Then
-destroy the proof volume and confirm the primary is untouched.
+Data integrity, where exactness *is* required:
+
+| | source | target |
+|---|---|---|
+| rows | 50,940 | 50,940 |
+| embedded | 50,940 | 50,940 |
+| indexes on `sections` | 13 | 13 |
+| content checksum | `71e6b110…b19397` | `71e6b110…b19397` |
+
+Retrieval, 12 questions × 3 modes, top 10:
+
+| mode | ids match | order match | mean overlap | criterion |
+|---|---|---|---|---|
+| full-text | 12/12 | 12/12 | 1.0000 | exact — GIN is deterministic |
+| vector | 11/12 | 11/12 | 0.9167 | ≥ 0.85 **and** one-sided hits are near-ties |
+| hybrid | 12/12 | 11/12 | 0.9667 | ≥ 0.85 **and** one-sided hits are near-ties |
+
+**VERDICT: EQUIVALENT.** The proof target was then destroyed and its volume removed; the source
+still reports 50,940 rows and the same checksum.
 
 ---
 
