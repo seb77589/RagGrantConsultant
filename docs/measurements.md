@@ -149,3 +149,93 @@ Model load takes 2.8 s from the local GGUF. No `<think>` tags appear with `--rea
 **Caveat:** this is a smoke test at ~16k context, not a systematic evaluation, and it does not clear
 the known GDN defects at long context. The fallback if problems appear later is a plain-dense
 Qwen3-8B-class GGUF, which avoids the GDN code path entirely.
+
+## HNSW build time and search latency
+
+Measured 2026-10-01 on the containerised stack, 50,940 CORDIS Horizon Europe sections, bge-m3
+1024-d, pgvector 0.8.6 on PostgreSQL 18. These are the two numbers `CLAUDE.md` flagged as blocked on
+"PostgreSQL and pgvector installed".
+
+### Load and index
+
+| Step | Result |
+|---|---|
+| Embed + COPY 50,940 sections | 5 min 52 s (~145 sections/s), while the generation model stayed resident |
+| Table size | 438 MB |
+| **HNSW build** (m=16, ef_construction=64, 4 parallel workers, 2 GB maintenance_work_mem) | **8.9 s** |
+| HNSW index size | 398 MB |
+| GIN full-text index | 27 MB |
+| Table + all indexes | 835 MB |
+
+For scale, the feasibility report cites 9.5 minutes to build HNSW over 1 million 1,536-dimension
+vectors with parallel builds. 8.9 s for 50,940 is consistent with that and leaves enormous headroom.
+
+### Search latency
+
+Ten realistic funding queries, five repetitions each (n=50 per mode), measured from inside the
+pipeline container with query vectors from the TEI service — the path a real query takes. Cache
+warmed first, so these are steady-state.
+
+| Mode | p50 | p95 | hits |
+|---|---|---|---|
+| Full-text only | 0.6 ms | 0.9 ms | 8.1 |
+| Vector only (HNSW) | 1.2 ms | 1.4 ms | 10 |
+| Hybrid (RRF over 50 candidates each side) | 6.8 ms | 8.3 ms | 10 |
+| Vector + country filter | 9.5 ms | 19.7 ms | 10 |
+| Hybrid + country filter | 25.2 ms | 26.1 ms | 10 |
+
+Worst case is 26 ms at p95, against a reranking step and a generation step that will take hundreds of
+milliseconds to seconds. **Retrieval is not the bottleneck and is nowhere near becoming one.**
+
+### Filtered vector search needed a fix to work at all
+
+The filtered rows above are only correct because of a change made during this measurement. HNSW is
+approximate: it walks the graph, returns `ef_search` candidates, and *then* PostgreSQL applies the
+WHERE clause. With a selective eligibility filter the post-filtering emptied the result entirely:
+
+```
+Index Scan using sections_embedding_hnsw
+  Filter: country = 'IE' OR country IS NULL
+  Rows Removed by Filter: 40
+  rows=0
+```
+
+Forty candidates fetched, forty discarded, **zero returned** — for a query with 1,260 genuinely
+matching sections (Ireland is 2.5% of the corpus). Not a slow query but a silently empty one, and
+since the structured eligibility filter applies to essentially every real query, it would have
+affected nearly all retrieval.
+
+The fix is pgvector 0.8.0's iterative index scans, set per statement in `gcr.db`:
+`hnsw.iterative_scan = relaxed_order`, with `max_scan_tuples` and `ef_search` scaled to the limit.
+`relaxed_order` rather than `strict_order` because results are reranked downstream anyway. The cost
+is visible — filtered vector search goes from 1.2 ms to 9.5 ms p50 — and entirely worth it, since the
+cheaper version returned nothing.
+
+This is also a concrete argument for pinning pgvector ≥ 0.8: the feature does not exist in earlier
+releases.
+
+### So: can the 500,000-section cap be relaxed?
+
+**Yes. The cap is no longer justified by anything measured.** It was set partly on embedding cost,
+which `measurements.md` already weakened, and partly on unmeasured index and search cost. Both are now
+measured and neither binds:
+
+| Measure | At 50,940 | Extrapolated to 500,000 | Extrapolated to 1,000,000 |
+|---|---|---|---|
+| Embedding | 5.9 min | ~1.0 h | ~2.0 h |
+| HNSW build | 8.9 s | ~2 min | ~4–5 min |
+| Table + indexes on disk | 835 MB | ~8 GB | ~16 GB |
+| Hybrid search p95 | 8.3 ms | tens of ms | tens of ms |
+
+HNSW is O(N log N) to build and O(log N) to search, so the index extrapolations are conservative
+rather than optimistic. The binding constraint is now **disk**: at ~16 GB per million sections plus
+raw payloads and snapshots, the 374 GB free is the real ceiling, and it is a long way off.
+
+Recommendation: treat `CORE_SECTION_CAP` as a soft guard rather than a hardware limit, and let corpus
+scope be decided by editorial value — whether a source is worth citing — rather than by an index cost
+that turns out to be negligible. Horizon Europe plus H2020 at ~126,000 sections sits comfortably
+inside what this machine handles.
+
+**Caveat:** these figures are for a single-user, warm-cache, single-concurrency workload on one
+laptop GPU and one NVMe. They say nothing about many concurrent users, and the latency numbers would
+need re-measuring under load before anyone promised them to a third party.

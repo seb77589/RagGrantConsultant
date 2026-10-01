@@ -49,6 +49,14 @@ services:
       AUTHELIA_DB_USER: ${AUTHELIA_DB_USER:-authelia}
       AUTHELIA_DB_PASSWORD: ${AUTHELIA_DB_PASSWORD:?set in .env}
       TZ: ${TZ:-Etc/UTC}
+    # Docker gives a container 64 MB of /dev/shm by default. PostgreSQL puts
+    # parallel workers' shared memory there, so a parallel HNSW build over
+    # 50,000 1024-dimension vectors dies with
+    #   DiskFull: could not resize shared memory segment ... to 2144407072 bytes
+    # which names the wrong resource entirely -- the disk has 370 GB free. The
+    # build wants a little over 2 GB, so this leaves headroom for a larger
+    # corpus and for raising maintenance_work_mem.
+    shm_size: 4gb
     volumes:
       # The PG18 image sets PGDATA=/var/lib/postgresql/18/docker and declares
       # its VOLUME at /var/lib/postgresql -- NOT the /var/lib/postgresql/data

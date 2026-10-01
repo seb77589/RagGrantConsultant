@@ -46,9 +46,9 @@ This file links to them rather than duplicating them.
 | 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | `48607dc` |
 | 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | `35da3b1` |
 | 3 | Pipeline image | **done** | 2026-10-01 | `9606587` |
-| 4 | Parity gate | **done** | 2026-10-01 | |
-| 5 | Model tier (embed, rerank, generate) | **done** | 2026-10-01 | |
-| 6 | Load, index, and the blocked measurements | not started | | |
+| 4 | Parity gate | **done** | 2026-10-01 | `78c3964` |
+| 5 | Model tier (embed, rerank, generate) | **done** | 2026-10-01 | `0da4802` |
+| 6 | Load, index, and the blocked measurements | **done** | 2026-10-01 | |
 | 7 | Identity tier (LLDAP, Authelia) | not started | | |
 | 8 | Edge (Caddy, forward auth, TLS) | not started | | |
 | 9 | Group-to-row-level access | not started | | |
@@ -462,19 +462,30 @@ Section IDs, text and token counts are also identical to the pre-containerisatio
 
 ## Phase 6 — Load, index, and the blocked measurements
 
-- [ ] **6.1 Load the 50,940 Horizon sections** into `sections` with embeddings.
-- [ ] **6.2 Build the HNSW index and time it**; build the full-text index.
-- [ ] **6.3 Measure search latency** — vector-only, full-text-only, hybrid — at p50/p95 over a fixed
+- [x] **6.1 Load the 50,940 Horizon sections** into `sections` with embeddings.
+- [x] **6.2 Build the HNSW index and time it**; build the full-text index.
+- [x] **6.3 Measure search latency** — vector-only, full-text-only, hybrid — at p50/p95 over a fixed
       query set, with and without the structured eligibility filter.
-- [ ] **6.4 Extrapolate** to 126,000 sections (Horizon + H2020) and to the 500,000 cap.
-- [ ] **6.5 Write the results into [`measurements.md`](measurements.md)** and state explicitly
+- [x] **6.4 Extrapolate** to 126,000 sections (Horizon + H2020) and to the 500,000 cap.
+- [x] **6.5 Write the results into [`measurements.md`](measurements.md)** and state explicitly
       whether the 500,000-section cap can be relaxed. This is the question `CLAUDE.md` says "needs
       PostgreSQL and pgvector installed"; this is where it finally gets answered.
 
-**Validation**
+**Validation** — run, passed. `gcr search "hydrogen production and storage"` returns ranked CORDIS
+projects, each with its project number, source URL and "as of" date attached. Full numbers are in
+[`measurements.md`](measurements.md); the headline is:
 
-A hybrid query returns plausible ranked sections with their source identifiers and dates attached,
-and the measured numbers are committed to `measurements.md`.
+| Measure | Result |
+|---|---|
+| Embed + load 50,940 sections | 5 min 52 s, with the generation model still resident |
+| **HNSW build** | **8.9 s** (index 398 MB, table + indexes 835 MB) |
+| Hybrid search p50 / p95 | 6.8 ms / 8.3 ms |
+| Hybrid + country filter p95 | 26.1 ms |
+
+**The 500,000-section cap can be relaxed.** It rested partly on embedding cost (already weakened) and
+partly on unmeasured index and search cost. Both are now measured and neither binds: at 500,000 the
+extrapolations are ~2 min to build the index and tens of milliseconds to search. The binding
+constraint is disk, at roughly 16 GB per million sections against 374 GB free.
 
 ---
 
@@ -768,3 +779,38 @@ of `--reasoning off`, which is what the service now uses. And `containers/fetch-
 `--user 0:0`, because a fresh named volume is root-owned while the curl image runs as uid 100 — the
 failure surfaces as `curl: (23) client returned ERROR on write`, which reads like a network fault and
 is a permission one.
+
+### 2026-10-01 — Phase 6 complete: the cap question is answered, and filtered search was broken
+
+The corpus is loaded, indexed and searchable, and the two measurements `CLAUDE.md` had blocked on
+"needs PostgreSQL and pgvector installed" now exist. **HNSW builds in 8.9 seconds** over 50,940
+vectors and hybrid search runs at 6.8 ms p50. Neither is anywhere near a constraint, so
+**the 500,000-section cap is no longer justified by anything measured** — full reasoning and
+extrapolations in [`measurements.md`](measurements.md).
+
+Two defects found, one of them serious.
+
+**Filtered vector search returned nothing at all.** HNSW fetches `ef_search` candidates and
+PostgreSQL applies the WHERE clause afterwards, so a country filter discarded all forty candidates
+and returned zero rows — for a query with 1,260 genuine matches. Since the structured eligibility
+filter (country, NUTS, programme) is applied to essentially every real query, nearly all retrieval
+would have come back empty, or near-empty, while looking perfectly healthy: no error, fast response,
+just no results. The fix is pgvector 0.8.0's iterative index scans, set per statement in `gcr.db`.
+It costs 1.2 ms → 9.5 ms p50 on filtered vector search, which is a trivial price for the difference
+between "nothing" and "the right ten rows". It is also a concrete reason the ≥ 0.8 pin matters:
+the feature does not exist before it.
+
+What caught this was measuring *hit counts* alongside latency. A latency benchmark alone would have
+reported filtered vector search as the fastest mode in the table and moved on.
+
+**PostgreSQL's parallel HNSW build died on Docker's default `/dev/shm`.** The error names the wrong
+resource entirely — `DiskFull: could not resize shared memory segment ... to 2144407072 bytes: No
+space left on device` — on a machine with 370 GB free. Docker gives a container 64 MB of `/dev/shm`
+by default and PostgreSQL puts parallel workers' shared memory there. `shm_size: 4gb` on the `db`
+service fixes it.
+
+Also added this phase, because Phase 6 could not run without them: `psycopg` as a core dependency,
+`src/gcr/db.py` (COPY-based bulk load, full-text/vector/hybrid retrieval, HNSW management), and the
+`load`, `build-index` and `search` CLI commands. Hybrid merging uses reciprocal rank fusion rather
+than a weighted score sum, because `ts_rank_cd` and cosine similarity are not on comparable scales
+and any fixed weighting between them would be a guess that quietly favours one half.
