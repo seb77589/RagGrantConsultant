@@ -7,6 +7,7 @@ in the manifest of any run.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,26 @@ EMBED_BATCH_SIZE = 32
 # Hardware ceilings from the report's section E, on a 16 GB laptop GPU.
 CORE_SECTION_CAP = 500_000
 PHASE1_SECTION_TARGET = 400_000
+
+# Database. The one environment variable in the codebase, deliberately: the
+# connection string is the only value that genuinely differs between running
+# inside the compose network (host `db`) and running against the loopback port
+# that compose publishes for psql. Everything else above is a decision, not a
+# deployment detail, and belongs in version control rather than in an
+# environment.
+#
+# The default targets the published loopback port so that a host-side `uv run`
+# works with no setup; compose sets DATABASE_URL to the in-network form.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://gcr@127.0.0.1:5432/gcr",
+)
+
+# Table names, so the two tiers cannot be confused in a query. The translated
+# tier is separate per CLAUDE.md: it is labelled in answers and
+# access-restricted, and must never be merged into the core corpus.
+SECTIONS_TABLE = "sections"
+SECTIONS_TRANSLATED_TABLE = "sections_translated"
 
 
 def ensure_dirs() -> None:

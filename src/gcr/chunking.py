@@ -101,6 +101,36 @@ def count_tokens(text: str) -> int:
     return max(1, round(len(text) / _CHARS_PER_TOKEN))
 
 
+def tokenizer_name() -> str:
+    """Which counter is in force. Printed by `gcr sections` so a run says so."""
+    return "bge-m3" if _hf_tokenizer() is not None else "character-heuristic"
+
+
+def require_real_tokenizer() -> None:
+    """Refuse to build a corpus with the character heuristic.
+
+    The fallback in `_hf_tokenizer` is deliberate: tests and the lint path must
+    run without the GPU stack. But the heuristic over-estimates by about 17%,
+    which inflates token counts, forces splits that the real tokenizer would
+    not, and so yields a *different corpus* — silently. Any path whose output
+    is recorded, compared or embedded must therefore insist on the real thing.
+
+    Discovered the hard way: the containerised pipeline produced different
+    chunk boundaries from the host until this was enforced.
+    """
+    if _hf_tokenizer() is None:
+        raise RuntimeError(
+            "the real bge-m3 tokenizer is unavailable, so token counts would "
+            "come from the character heuristic, which over-estimates by ~17% "
+            "and produces a different corpus.\n"
+            "  fix:      install the tokenizer   -> uv sync --extra tokenize\n"
+            "  in a container: the 'tokenize' extra is in the pipeline image; "
+            "a first run needs network to fetch the tokenizer into HF_HOME\n"
+            "  override: --allow-token-heuristic (for a rough count only; "
+            "never for a corpus that will be embedded or compared)"
+        )
+
+
 def split_sentences(text: str) -> list[str]:
     out: list[str] = []
     for block in _PARA_RE.split(text.strip()):

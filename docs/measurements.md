@@ -75,3 +75,167 @@ bulk embedding may be unnecessary. Not yet verified with Qwen loaded alongside.
 now much weaker.** Re-embedding after a chunking change costs about 1 h at 500,000 sections, not a
 day. The cap should be revisited once HNSW build time and search latency are measured on real
 data, which needs PostgreSQL and pgvector installed.
+
+## Model serving, containerised
+
+Measured 2026-10-01 on the containerised stack (see `containerisation-plan.md`). All three model
+services run on the one RTX 3080 Laptop simultaneously; the driver time-slices between them.
+
+### What is actually served
+
+The feasibility report says "Qwen3.5-9B" and leaves it there, which is not enough to reproduce a run.
+The model exists, but it is not the plain dense 9B that wording suggests: it is a hybrid **Gated
+DeltaNet + sparse MoE** model, multimodal, with 262,144 native context and reasoning enabled by
+default.
+
+| Role | Served by | Image |
+|---|---|---|
+| Generation | `unsloth/Qwen3.5-9B-GGUF` → `Qwen3.5-9B-UD-Q4_K_XL.gguf` (5,966,095,584 B) | `ghcr.io/ggml-org/llama.cpp:server-cuda-b11206` |
+| Embeddings | `BAAI/bge-m3`, 1024-d, **CLS pooling** | `ghcr.io/huggingface/text-embeddings-inference:86-1.9.4` |
+| Reranking | `BAAI/bge-reranker-v2-m3`, via TEI's native `/rerank` | same TEI image |
+
+Generation flags that matter: `--ctx-size 16384` (never the native 262144), `--n-gpu-layers 999`,
+`--cache-type-k q8_0 --cache-type-v q8_0`, `--flash-attn auto`, `--reasoning off`, `--host 0.0.0.0`.
+
+### VRAM: the stack is far lighter than the report assumed
+
+| Process | VRAM |
+|---|---|
+| llama.cpp (Qwen3.5-9B Q4_K_XL, 16k ctx, q8_0 KV) | 5,958 MiB |
+| TEI bge-m3 | 1,362 MiB |
+| TEI bge-reranker-v2-m3 | 1,330 MiB |
+| **Total resident** | **8,732 MiB of 16,384** |
+| **Free** | **7,244 MiB** |
+
+The report estimated 9–12 GB for the same three roles, and the containerisation plan budgeted
+11–14 GB. Actual is **8.5 GB, with 7.2 GB spare** — so the GPU is not the binding constraint it was
+treated as. Two consequences:
+
+- **The report's advice to stop the chat model during bulk embedding is unnecessary.** Embedding
+  peaks at 1.42 GB; with the full serving stack resident there is more than four times that free.
+  This settles the question left open in the embedding-throughput section above.
+- There is room to raise `--ctx-size` beyond 16k if a future retrieval path ever needs it, though
+  6–10 reranked sections do not.
+
+### The two embedding paths agree
+
+The index is built by the pipeline's local FlagEmbedding and queried through the TEI service. If
+those disagree the vectors are incomparable, and retrieval degrades in a way that looks like a weak
+corpus rather than a configuration fault. Cosine similarity between the two, same input:
+
+| Text | Cosine |
+|---|---|
+| "Funding for photonics research in Ireland." | 0.999995 |
+| "The call has a budget of EUR 12,000,000 and a 70% funding rate." | 0.999994 |
+| "Kis- és középvállalkozások támogatása." (non-ASCII) | 0.999988 |
+
+Worst case 0.999988 against a 0.99 bar. This also confirms `--pooling cls` is correct: bge-m3 is
+CLS-pooled, and a silent fall-through to mean pooling would have shown here as a much lower cosine.
+
+### Generation quality on this hardware
+
+llama.cpp's support for Gated DeltaNet is recent, with open issues covering a CUDA kernel crash on
+sm_70, silent instant-EOS past ~130k context, and HIP context corruption. None is confirmed for
+sm_86, so the model was smoke-tested for coherence before anything was built on it:
+
+- Grounded extraction from a supplied context returned the correct funding rate and deadline.
+- Asked for a deadline the context did not contain, it said so rather than inventing one — the
+  behaviour the no-hallucinated-figures rule depends on.
+- A sustained 400-token completion stayed coherent and accurate (the 250-employee and €50 million
+  ceilings of Recommendation 2003/361/EC) with no drift and no premature EOS.
+
+Model load takes 2.8 s from the local GGUF. No `<think>` tags appear with `--reasoning off`.
+
+**Caveat:** this is a smoke test at ~16k context, not a systematic evaluation, and it does not clear
+the known GDN defects at long context. The fallback if problems appear later is a plain-dense
+Qwen3-8B-class GGUF, which avoids the GDN code path entirely.
+
+## HNSW build time and search latency
+
+Measured 2026-10-01 on the containerised stack, 50,940 CORDIS Horizon Europe sections, bge-m3
+1024-d, pgvector 0.8.6 on PostgreSQL 18. These are the two numbers `CLAUDE.md` flagged as blocked on
+"PostgreSQL and pgvector installed".
+
+### Load and index
+
+| Step | Result |
+|---|---|
+| Embed + COPY 50,940 sections | 5 min 52 s (~145 sections/s), while the generation model stayed resident |
+| Table size | 438 MB |
+| **HNSW build** (m=16, ef_construction=64, 4 parallel workers, 2 GB maintenance_work_mem) | **8.9 s** |
+| HNSW index size | 398 MB |
+| GIN full-text index | 27 MB |
+| Table + all indexes | 835 MB |
+
+For scale, the feasibility report cites 9.5 minutes to build HNSW over 1 million 1,536-dimension
+vectors with parallel builds. 8.9 s for 50,940 is consistent with that and leaves enormous headroom.
+
+### Search latency
+
+Ten realistic funding queries, five repetitions each (n=50 per mode), measured from inside the
+pipeline container with query vectors from the TEI service — the path a real query takes. Cache
+warmed first, so these are steady-state.
+
+| Mode | p50 | p95 | hits |
+|---|---|---|---|
+| Full-text only | 0.6 ms | 0.9 ms | 8.1 |
+| Vector only (HNSW) | 1.2 ms | 1.4 ms | 10 |
+| Hybrid (RRF over 50 candidates each side) | 6.8 ms | 8.3 ms | 10 |
+| Vector + country filter | 9.5 ms | 19.7 ms | 10 |
+| Hybrid + country filter | 25.2 ms | 26.1 ms | 10 |
+
+Worst case is 26 ms at p95, against a reranking step and a generation step that will take hundreds of
+milliseconds to seconds. **Retrieval is not the bottleneck and is nowhere near becoming one.**
+
+### Filtered vector search needed a fix to work at all
+
+The filtered rows above are only correct because of a change made during this measurement. HNSW is
+approximate: it walks the graph, returns `ef_search` candidates, and *then* PostgreSQL applies the
+WHERE clause. With a selective eligibility filter the post-filtering emptied the result entirely:
+
+```
+Index Scan using sections_embedding_hnsw
+  Filter: country = 'IE' OR country IS NULL
+  Rows Removed by Filter: 40
+  rows=0
+```
+
+Forty candidates fetched, forty discarded, **zero returned** — for a query with 1,260 genuinely
+matching sections (Ireland is 2.5% of the corpus). Not a slow query but a silently empty one, and
+since the structured eligibility filter applies to essentially every real query, it would have
+affected nearly all retrieval.
+
+The fix is pgvector 0.8.0's iterative index scans, set per statement in `gcr.db`:
+`hnsw.iterative_scan = relaxed_order`, with `max_scan_tuples` and `ef_search` scaled to the limit.
+`relaxed_order` rather than `strict_order` because results are reranked downstream anyway. The cost
+is visible — filtered vector search goes from 1.2 ms to 9.5 ms p50 — and entirely worth it, since the
+cheaper version returned nothing.
+
+This is also a concrete argument for pinning pgvector ≥ 0.8: the feature does not exist in earlier
+releases.
+
+### So: can the 500,000-section cap be relaxed?
+
+**Yes. The cap is no longer justified by anything measured.** It was set partly on embedding cost,
+which `measurements.md` already weakened, and partly on unmeasured index and search cost. Both are now
+measured and neither binds:
+
+| Measure | At 50,940 | Extrapolated to 500,000 | Extrapolated to 1,000,000 |
+|---|---|---|---|
+| Embedding | 5.9 min | ~1.0 h | ~2.0 h |
+| HNSW build | 8.9 s | ~2 min | ~4–5 min |
+| Table + indexes on disk | 835 MB | ~8 GB | ~16 GB |
+| Hybrid search p95 | 8.3 ms | tens of ms | tens of ms |
+
+HNSW is O(N log N) to build and O(log N) to search, so the index extrapolations are conservative
+rather than optimistic. The binding constraint is now **disk**: at ~16 GB per million sections plus
+raw payloads and snapshots, the 374 GB free is the real ceiling, and it is a long way off.
+
+Recommendation: treat `CORE_SECTION_CAP` as a soft guard rather than a hardware limit, and let corpus
+scope be decided by editorial value — whether a source is worth citing — rather than by an index cost
+that turns out to be negligible. Horizon Europe plus H2020 at ~126,000 sections sits comfortably
+inside what this machine handles.
+
+**Caveat:** these figures are for a single-user, warm-cache, single-concurrency workload on one
+laptop GPU and one NVMe. They say nothing about many concurrent users, and the latency numbers would
+need re-measuring under load before anyone promised them to a third party.

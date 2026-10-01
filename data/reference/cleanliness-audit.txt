@@ -1,0 +1,50 @@
+# Host cleanliness audit, post-containerisation
+# Captured: 2026-10-01T09:25:31Z
+# Compared against data/reference/host-baseline-pre.txt
+
+## The claim this project made
+"Nothing is installed on the host." Verified, not asserted:
+
+apt packages before   2406
+apt packages after    2406
+sorted list sha256    5ecc79c10807071428306cab396bed9bdede7bcf2fc5a414bfda666194c17542   before
+                      5ecc79c10807071428306cab396bed9bdede7bcf2fc5a414bfda666194c17542   after
+result                IDENTICAL - zero packages added, removed or changed
+
+## What was added, and where
+All of it is Docker-owned storage under /var/lib/docker, plus the repo.
+
+free disk before      374 GB
+free disk after       324 GB
+consumed              50 GB standing footprint
+   An additional 46.1 GB of Docker build cache was created by building the
+   embed image and reclaimed on 2026-10-01 with `docker builder prune --all`,
+   taking free disk from 288 GB back to 324 GB. Running containers, volumes
+   and images were unaffected.
+
+gcr_hf_cache          8.5 GB   bge-m3 + reranker weights
+gcr_models            5.6 GB   Qwen3.5-9B GGUF
+gcr_pgdata            1.6 GB   50,940 sections with embeddings and indexes
+gcr_caddy_data         72 KB   the local CA
+gcr_lldap_data        152 KB   users and groups
+gcr_authelia_data     4.0 KB   notifications
+repository            555 MB   includes gitignored CORDIS zip and snapshots
+
+## Pre-existing, not created by this project
+docker 29.1.3, compose 2.40.3, nvidia-container-toolkit 1.20.1, ollama 0.23.0.
+~/.cache/huggingface (4.3 GB) belongs to the host venv, which predates this
+work and is kept as a development convenience; the containers use the
+gcr_hf_cache volume instead.
+
+## From-zero rebuild (step 11.1)
+Stateful volumes destroyed, then the stack rebuilt from the repository and
+.env alone, with no manual fixups:
+  all 7 services healthy        ~15 s
+  schema + extensions           recreated by initdb, vector 0.8.6
+  identity                      ./containers/bootstrap-identity.sh
+  corpus                        50,940 rows reloaded, 434 MB
+  HNSW index                    9.1 s (8.9 s on the first build)
+  edge chain                    302 unauthenticated, 200 on /about, 200 authenticated
+  retrieval                     hybrid query returns cited, dated sections
+
+Teardown instructions: docs/teardown.md

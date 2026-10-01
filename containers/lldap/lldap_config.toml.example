@@ -1,0 +1,30 @@
+# LLDAP configuration template.
+#
+# Copy to lldap_config.toml, which is gitignored. Secrets are NOT set here:
+# they come from the *_FILE environment variables in compose.yaml, which read
+# from secrets/. Anything secret written into this file would be committed by
+# whoever copies the template without reading it.
+
+## The base DN for the directory. Mirrors the project rather than a real
+## domain, because nothing here is internet-facing.
+ldap_base_dn = "dc=gcr,dc=local"
+
+## The admin account Authelia binds as.
+ldap_user_dn = "admin"
+ldap_user_email = "admin@gcr.local"
+
+## Ports. Neither is published to the host: Authelia reaches LDAP over the
+## compose network, and the web UI is reached through Caddy.
+ldap_port = 3890
+http_port = 17170
+
+## SQLite on a named volume. LLDAP also supports PostgreSQL, but its dataset is
+## a handful of users and groups, and SQLite avoids making the login chain
+## depend on PostgreSQL's start-up ordering -- a database restart should not be
+## able to stop people signing in.
+database_url = "sqlite:///data/users.db?mode=rwc"
+
+## Where the web UI is served from, for links in password-reset mail.
+http_url = "https://grants.localhost/lldap"
+
+verbose = false

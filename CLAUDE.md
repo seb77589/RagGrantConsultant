@@ -24,8 +24,22 @@ uv run --with pytest pytest -q -k abbreviation  # one test by name
 uv run --with ruff ruff check src tests         # lint set is pinned in pyproject.toml
 ```
 
-Not installed on the development machine, and needed for the next phase: `podman`, `postgresql`
-with `pgvector`, `caddy`.
+The containerised path is the canonical one — the host venv above stays as a dev convenience:
+
+```bash
+./containers/gen-secrets.sh                     # once: writes .env and secrets/ (idempotent)
+docker compose --profile core up -d             # PostgreSQL + pgvector
+docker compose run --rm pipeline gcr sections horizon
+docker compose run --rm pipeline pytest
+docker compose --profile core --profile models --profile auth --profile edge up -d
+```
+
+**Nothing needs installing on the development machine.** Docker 29.1.3, Compose v2.40.3 and the
+NVIDIA Container Toolkit 1.20.1 are already present, and every other service — PostgreSQL+pgvector,
+Caddy, Authelia, LLDAP, the model servers — runs as a container. The ingestion pipeline is
+containerised too, so `torch`/`transformers`/`FlagEmbedding` need not be on the host either.
+`docs/containerisation-plan.md` is the tracked, resumable checklist for the build-out; it also
+records the pinned image versions and the open risks.
 
 ## What is being built
 
@@ -46,7 +60,13 @@ centre).
 
 Runtime, per the report's work packages:
 
-- **Rootless Podman** with Quadlet systemd units for all services.
+- **Docker Compose with profiles** for all services (`core`, `tools`, `models`, `auth`, `edge`).
+  This supersedes the report's "rootless Podman with Quadlet systemd units": the engine, Compose and
+  the NVIDIA Container Toolkit were already installed on this machine, so Docker keeps the host clean
+  at zero cost, where Podman would have meant installing five packages. The trade is real and worth
+  knowing — it drops the 8–12 h Quadlet work package the report counted as job practice. Compose
+  files avoid Docker-only features where that is free; the one exception is the GPU `driver: cdi`
+  reservation block, which podman-compose does not support.
 - **Caddy** reverse proxy in front of **Authelia** + **LLDAP** for login; Authelia/LLDAP groups map
   to row-level filters in the database.
 - **PostgreSQL + pgvector**: HNSW vector index alongside PostgreSQL full-text search.

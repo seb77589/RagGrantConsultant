@@ -1,0 +1,50 @@
+# Migration-equivalence proof: the "new data centre".
+#
+#   docker compose -f compose.yaml -f compose.proof.yaml --profile proof up -d db-proof
+#
+# A second PostgreSQL on a second, empty volume. Containerisation makes this a
+# more honest rehearsal than a host install would: the target really is a
+# separate machine's worth of state, created from nothing and destroyable
+# without touching the original, rather than a second database on the same
+# server sharing its configuration and page cache.
+#
+# The proof compares retrieval before and after, not just row counts. Equal
+# counts would pass while an index was missing and every ranking had changed.
+
+services:
+  db-proof:
+    image: pgvector/pgvector:0.8.6-pg18-trixie
+    profiles: ["proof"]
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      AUTHELIA_DB_NAME: ${AUTHELIA_DB_NAME:-authelia}
+      AUTHELIA_DB_USER: ${AUTHELIA_DB_USER:-authelia}
+      AUTHELIA_DB_PASSWORD: ${AUTHELIA_DB_PASSWORD:?set in .env}
+      TZ: ${TZ:-Etc/UTC}
+    # Same as the primary: parallel HNSW rebuild on restore needs more than
+    # Docker's default 64 MB of /dev/shm.
+    shm_size: 4gb
+    volumes:
+      # A DIFFERENT named volume. The whole point is that nothing is shared
+      # with the source, so a restore cannot accidentally read the original.
+      - pgdata_proof:/var/lib/postgresql
+      # Deliberately NOT mounting containers/db/initdb: the restore must bring
+      # its own schema, extensions and indexes. Pre-creating them here would
+      # hide exactly the kind of omission the proof exists to catch.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend
+
+volumes:
+  pgdata_proof:

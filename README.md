@@ -14,8 +14,12 @@ and other rightholders, reused under the terms indicated for each source.
 
 ## Status
 
-Phase 1, early. The ingestion pipeline works end to end for CORDIS; the runtime stack
-(PostgreSQL + pgvector, the login chain, model serving) is not built yet.
+Phase 1. The ingestion pipeline works end to end for CORDIS, and the runtime stack runs as
+containers: PostgreSQL + pgvector with hybrid retrieval, bge-m3 and the reranker on TEI, Qwen3.5-9B
+on llama.cpp, and the Caddy/Authelia/LLDAP login chain. Nothing is installed on the host --
+[`docs/containerisation-plan.md`](docs/containerisation-plan.md) tracks the build-out and
+[`docs/teardown.md`](docs/teardown.md) says how to give the disk back. What remains for Phase 1 is
+reranking in the retrieval path, answer composition with sources, and the evaluation set.
 
 | Piece | State |
 |---|---|
@@ -24,10 +28,16 @@ Phase 1, early. The ingestion pipeline works end to end for CORDIS; the runtime 
 | Sentence-aware chunking, bge-m3 token budget | done |
 | CORDIS bulk adapter (Horizon Europe, H2020) | done |
 | bge-m3 embedding + throughput benchmark | done |
-| PostgreSQL + pgvector schema, hybrid retrieval | not started |
-| Reranking and answer composition | not started |
-| Podman/Quadlet, Caddy, Authelia, LLDAP | not started |
-| Migration-equivalence proof | not started |
+| PostgreSQL + pgvector schema, hybrid retrieval | done |
+| Containerised stack (Docker Compose, profiles) | done |
+| Containerised ingestion pipeline | done |
+| Model serving: bge-m3, reranker, generation | done |
+| Caddy, Authelia, LLDAP login chain | done |
+| Group-based access restriction, enforced in SQL | done |
+| Migration-equivalence proof | done |
+| Reranking wired into the retrieval path | not started |
+| Answer composition with sources | not started |
+| ~150-question evaluation set | not started |
 
 ## Requirements
 
@@ -35,10 +45,22 @@ Phase 1, early. The ingestion pipeline works end to end for CORDIS; the runtime 
 - [`uv`](https://docs.astral.sh/uv/)
 - For embedding: an NVIDIA GPU with ~16 GB VRAM and a working CUDA driver
 
-Not yet installed on the development machine, and needed for later phases:
-`podman`, `postgresql` (with `pgvector`), `caddy`.
+Nothing further needs installing. The runtime stack is containerised, and Docker 29.1.3,
+Compose v2.40.3 and the NVIDIA Container Toolkit 1.20.1 are already present on the development
+machine. See [`docs/containerisation-plan.md`](docs/containerisation-plan.md) for the tracked
+build-out, the pinned image versions and the open risks.
 
 ## Setup
+
+Containerised (canonical -- no host packages beyond Docker, which is already present):
+
+```bash
+./containers/gen-secrets.sh                # once: writes .env and secrets/, idempotent
+docker compose --profile core up -d        # PostgreSQL + pgvector
+docker compose run --rm pipeline gcr --help
+```
+
+On the host (a dev convenience; the same code, the same results):
 
 ```bash
 uv sync                  # core pipeline
@@ -54,6 +76,10 @@ uv run gcr sections horizon --out data/interim/horizon.jsonl
 uv run gcr benchmark-embed horizon --n 10000
 uv run gcr manifest               # show what has been fetched
 ```
+
+Every command above has a containerised equivalent -- `docker compose run --rm pipeline gcr
+sections horizon` and so on -- which is the form used for anything whose result is recorded, so
+that measurements are reproducible rather than dependent on the host venv.
 
 `fetch` skips the download when upstream reports an unchanged `Last-Modified`; pass `--force` to
 override.
