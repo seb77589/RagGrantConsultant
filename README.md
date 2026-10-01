@@ -14,9 +14,12 @@ and other rightholders, reused under the terms indicated for each source.
 
 ## Status
 
-Phase 1, early. The ingestion pipeline works end to end for CORDIS. The runtime stack
-(PostgreSQL + pgvector, the login chain, model serving) is being built out as containers --
-see [`docs/containerisation-plan.md`](docs/containerisation-plan.md).
+Phase 1. The ingestion pipeline works end to end for CORDIS, and the runtime stack runs as
+containers: PostgreSQL + pgvector with hybrid retrieval, bge-m3 and the reranker on TEI, Qwen3.5-9B
+on llama.cpp, and the Caddy/Authelia/LLDAP login chain. Nothing is installed on the host --
+[`docs/containerisation-plan.md`](docs/containerisation-plan.md) tracks the build-out and
+[`docs/teardown.md`](docs/teardown.md) says how to give the disk back. What remains for Phase 1 is
+reranking in the retrieval path, answer composition with sources, and the evaluation set.
 
 | Piece | State |
 |---|---|
@@ -25,14 +28,16 @@ see [`docs/containerisation-plan.md`](docs/containerisation-plan.md).
 | Sentence-aware chunking, bge-m3 token budget | done |
 | CORDIS bulk adapter (Horizon Europe, H2020) | done |
 | bge-m3 embedding + throughput benchmark | done |
-| PostgreSQL + pgvector schema, hybrid retrieval | not started |
-| Reranking and answer composition | not started |
-| Containerised stack (Docker Compose, profiles) | in progress |
-| PostgreSQL + pgvector container | in progress |
-| Containerised ingestion pipeline | not started |
-| Model serving: bge-m3, reranker, generation | not started |
-| Caddy, Authelia, LLDAP login chain | not started |
-| Migration-equivalence proof | not started |
+| PostgreSQL + pgvector schema, hybrid retrieval | done |
+| Containerised stack (Docker Compose, profiles) | done |
+| Containerised ingestion pipeline | done |
+| Model serving: bge-m3, reranker, generation | done |
+| Caddy, Authelia, LLDAP login chain | done |
+| Group-based access restriction, enforced in SQL | done |
+| Migration-equivalence proof | done |
+| Reranking wired into the retrieval path | not started |
+| Answer composition with sources | not started |
+| ~150-question evaluation set | not started |
 
 ## Requirements
 

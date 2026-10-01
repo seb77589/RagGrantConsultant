@@ -53,7 +53,7 @@ This file links to them rather than duplicating them.
 | 8 | Edge (Caddy, forward auth, TLS) | **done** | 2026-10-01 | |
 | 9 | Group-to-row-level access | **done** | 2026-10-01 | |
 | 10 | Migration-equivalence proof | **done** | 2026-10-01 | |
-| 11 | Cleanliness audit and resumability | not started | | |
+| 11 | Cleanliness audit and resumability | **done** | 2026-10-01 | |
 
 ---
 
@@ -602,20 +602,33 @@ still reports 50,940 rows and the same checksum.
 This phase delivers the goal that motivated the whole plan, so it is a real step, not a closing
 remark.
 
-- [ ] **11.1 Rebuild from zero** on a scratch copy: `docker compose down -v`, then `up`, proving the
+- [x] **11.1 Rebuild from zero** on a scratch copy: `docker compose down -v`, then `up`, proving the
       stack comes back from repo + `.env` alone with no manual fixups.
-- [ ] **11.2 Diff the host against the Phase-0 baseline** — no new apt packages, nothing written
+- [x] **11.2 Diff the host against the Phase-0 baseline** — no new apt packages, nothing written
       outside `/var/lib/docker`, the repo, and the user's docker config. Record disk consumed by
       images and volumes against the 374 GB budget (note that `/var/lib/docker` shares a filesystem
       with the corpus).
-- [ ] **11.3 Document teardown** — `docker compose down -v`, named-volume removal, `docker image rm`
+- [x] **11.3 Document teardown** — `docker compose down -v`, named-volume removal, `docker image rm`
       by pin — and what a later Podman/Quadlet conversion would involve, including the `driver: cdi`
       block.
-- [ ] **11.4 Final commit.**
+- [x] **11.4 Final commit.**
 
-**Validation**
+**Validation** — run, passed. Recorded in `data/reference/cleanliness-audit.txt`; teardown in
+[`teardown.md`](teardown.md).
 
-The host diff is empty apart from Docker-owned storage, and a from-scratch `up` succeeds.
+**The headline claim is verified rather than asserted: 2,406 apt packages before, 2,406 after,
+identical sha256 over the sorted package list. Zero host packages added, removed or changed.**
+
+From-zero rebuild: the stateful volumes (`pgdata`, `authelia_data`, `lldap_data`, `caddy_data`,
+`caddy_config`) were destroyed and the stack rebuilt from the repository and `.env` alone, with no
+manual fixups — all seven services healthy in ~15 s, schema and extensions recreated by initdb,
+identity rebootstrapped by script, 50,940 rows reloaded, HNSW rebuilt in 9.1 s (8.9 s first time),
+and the edge chain still giving 302 / 200 / 200. The model-weight volumes were deliberately kept,
+since `containers/fetch-model.sh` is separately verified and re-downloading 14 GB proves nothing new.
+
+Storage: free disk went 374 GB → 288 GB. **46 GB of the 86 GB consumed is Docker build cache**, which
+is pure overhead and reclaimable with `docker builder prune --all` — the single easiest thing to
+reclaim, noted in `teardown.md`.
 
 ---
 
@@ -896,3 +909,35 @@ install its root CA from inside a container. `containers/trust-local-ca.sh` extr
 it into the system store; Firefox and Chrome on Linux keep separate stores and need a manual import,
 which the script prints. The CA is on the `gcr_caddy_data` volume and survives a recreate but not
 `down -v`.
+
+### 2026-10-01 — Phases 10 and 11 complete: the plan is finished
+
+**The migration-equivalence proof passes**, and getting there corrected a mistake in how the proof
+itself was written. The first comparison demanded that every retrieval result match exactly and
+reported `NOT EQUIVALENT` on 4 of 36 differences. That verdict was wrong: HNSW is an *approximate*
+index, a restore rebuilds the graph with a different insertion order, and nearest-neighbour results
+therefore differ at the cut-off even when the data is identical. Demanding exact equality tests the
+index's determinism, not the migration.
+
+The rewritten comparison splits the checks by what is genuinely deterministic — exact match for row
+counts, index counts, full-text results and a content checksum over every
+`(section_id, text, embedding)` tuple; a threshold plus a **near-tie test** for the approximate
+modes. The near-tie test is what makes the threshold defensible: every section returned on one side
+but not the other must exist on both and score within 0.02 of the last result that made the top ten,
+which distinguishes ranking noise at the boundary from lost data. Result: identical checksums,
+full-text 12/12 exact, vector 0.9167, hybrid 0.9667, **EQUIVALENT**.
+
+**The cleanliness claim is verified, not asserted.** 2,406 apt packages before and after, identical
+checksum over the sorted list. Everything this work added lives under `/var/lib/docker` or in the
+repository.
+
+The from-zero rebuild worked without a single manual fixup, which is the real test of whether the
+plan's artefacts are complete. One number is worth flagging to whoever reads this next: of the 86 GB
+consumed, **46 GB is Docker build cache** — reclaimable in one command and by far the easiest saving
+available.
+
+Two limits worth stating plainly rather than leaving implied. The latency and throughput figures
+throughout are single-user, warm-cache, single-concurrency on one laptop GPU; they say nothing about
+concurrent users. And the generation model passed a coherence smoke test, not an evaluation — the
+~150-question evaluation set that Phase 1 calls for is still to come, and R1's fallback stays on
+record until then.
