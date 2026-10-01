@@ -43,8 +43,8 @@ This file links to them rather than duplicating them.
 | Phase | What it delivers | State | Date | Commit |
 |---|---|---|---|---|
 | 0 | Preflight and baseline | **done** | 2026-10-01 | `b703ba8` |
-| 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | |
-| 2 | Database tier (PostgreSQL + pgvector) | not started | | |
+| 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | `48607dc` |
+| 2 | Database tier (PostgreSQL + pgvector) | **done** | 2026-10-01 | |
 | 3 | Pipeline image | not started | | |
 | 4 | Parity gate | not started | | |
 | 5 | Model tier (embed, rerank, generate) | not started | | |
@@ -124,7 +124,10 @@ GrantConsultantRAG/
 │   ├── caddy/Caddyfile
 │   ├── authelia/configuration.yml.example
 │   ├── lldap/lldap_config.toml.example
-│   └── db/initdb/                # 01-extensions.sql, 02-schema.sql, 03-indexes.sql
+│   ├── gen-secrets.sh            # idempotent: writes .env and secrets/
+│   └── db/
+│       ├── initdb/               # 00-authelia-db.sh, 01-extensions.sql, 02-schema.sql, 03-indexes.sql
+│       └── hnsw.sql              # built after the bulk load, in 6.2, so the timing means something
 ├── secrets/.gitkeep              # generated secrets, gitignored
 └── docs/
     ├── containerisation-plan.md  # this file
@@ -312,26 +315,46 @@ validates nothing useful here, which is worth knowing before trusting it as a ch
 
 ## Phase 2 — Database tier
 
-- [ ] **2.1 Add the `db` service** on the pinned pgvector image, with a `pg_isready` healthcheck and
-      the `gcr_pgdata` named volume.
-- [ ] **2.2 `01-extensions.sql`** — `CREATE EXTENSION vector; CREATE EXTENSION pg_trgm;`
-- [ ] **2.3 `02-schema.sql`** — the `sections` table carrying **every field the hard design rules
-      make mandatory**: source identifier, source date, fetch date, country, NUTS region, programme
-      period, origin, access group, chunking version — plus `vector(1024)` and a generated `tsvector`.
-      The translated tier gets a **separate table**, per the Kohesio rule. Also create the `authelia`
-      database and role for step 7.2.
-- [ ] **2.4 Add a minimal DB config surface** to `src/gcr/config.py`, reading `DATABASE_URL` from the
-      environment with a sane default. This is the first environment variable in the codebase — keep
-      it to one.
+- [x] **2.1 Add the `db` service** on `pgvector/pgvector:0.8.6-pg18-trixie`, `pg_isready`
+      healthcheck, `gcr_pgdata` volume. Healthy in ~5 s.
+- [x] **2.2 `01-extensions.sql`** — `vector` 0.8.6, `pg_trgm` 1.6, `unaccent` 1.1. `unaccent` was
+      added beyond the plan: the corpus is English-origin, but the organisation and place names in it
+      are not (*Göteborg*, *Łódź*, *Côte*). Versions are logged at init so the migration proof can
+      rule an extension-version difference in or out as an explanation for differing results.
+- [x] **2.3 `02-schema.sql`** — `sections` (22 columns), `sections_translated` (22, built with `LIKE
+      … INCLUDING GENERATED` so the tiers cannot drift apart), and `ingestion_runs` tying rows back
+      to a manifest sha256 and a chunking/embed version. `00-authelia-db.sh` creates the `authelia`
+      database and role for 7.2. Two `DOMAIN`s (`programme_period`, `iso_country`) carry the
+      vocabularies as CHECKs over `text` rather than `ENUM` — cheaper to extend when 2035-2041
+      arrives, and it keeps type OIDs out of the migration comparison.
+- [x] **2.4 Add a minimal DB config surface** — `DATABASE_URL` in `src/gcr/config.py`, defaulting to
+      the published loopback port so a host-side `uv run` needs no setup, with compose overriding it
+      to the in-network form. Plus `SECTIONS_TABLE` / `SECTIONS_TRANSLATED_TABLE` constants so the
+      two tiers cannot be confused in a query. Covered by `tests/test_config.py`.
 
-**Validation**
+**Validation** — run, passed. `vector` reports **0.8.6**. All four init scripts ran with no errors on
+a fresh volume, and the schema was then exercised rather than merely parsed — the hard design rules
+are enforced *in the database*, not just by convention in code:
 
-```sql
-SELECT extversion FROM pg_extension WHERE extname = 'vector';   -- expect 0.8.6
-```
+| Attempted | Result |
+|---|---|
+| insert well-formed `english_origin` section | accepted |
+| insert `machine_translated` into **core** | **rejected** (the Kohesio rule, in SQL) |
+| insert `english_origin` into **translated tier** | **rejected** (mirror rule: nothing else hides there) |
+| `country = 'ireland'` | **rejected** (ISO-2 upper only) |
+| `programme_period = '2035-2041'` | **rejected** (extend the CHECK deliberately) |
+| `source_url = NULL`, `fetch_date = NULL` | **rejected** (identity and dates are sacred) |
+| blank text | **rejected** |
+| duplicate `(source_system, source_id, ordinal)` | **rejected** (would double a section's retrieval weight) |
+| `source_date = NULL` | accepted — some upstreams publish none, and it is never guessed |
+| `vector` of 3 dimensions | **rejected**: `expected 1024 dimensions, not 3` |
 
-Schema applies cleanly on a fresh volume, and `docker compose down && docker compose up -d` preserves
-the data.
+Also confirmed: the generated `tsv` weights `part` as `B` and body as `C`
+(`'fund':2C 'object':1B 'photon':4C`), stemming matches *funding* from *fund*, `access_group` defaults
+to `public` in core and `restricted` in the translated tier, and **`docker compose down` then `up -d`
+preserved all rows and the stored 1024-dim embedding** — the check that proves the corrected PGDATA
+mount works. Test rows were then truncated. Host suite: **33 passed** (29 before this phase; the
+plan's earlier figure of 32 was wrong), `ruff check` clean.
 
 ---
 
@@ -523,7 +546,7 @@ The stack is proven when all of these hold:
    everything to healthy from a clean machine.
 2. `docker compose run --rm pipeline gcr sections horizon` reproduces **exactly 50,940 sections**
    with identical IDs.
-3. `docker compose run --rm pipeline pytest` passes inside the container.
+3. `docker compose run --rm pipeline pytest` passes inside the container (33 tests).
 4. A hybrid retrieval query returns ranked sections with source identifiers and dates attached.
 5. An unauthenticated browser request is redirected to the Authelia portal; an authenticated one is
    served; and a restricted-tier row is withheld from a user outside its group.
@@ -587,3 +610,30 @@ Scaffolding, `.env.example`, the secret generator, `compose.yaml` with the `db` 
 Also worth recording: `docker compose config` with no `--profile` prints `services: {}` and exits 0,
 because every service is behind a profile. As a validation step that is worthless; the profile must
 be named.
+
+### 2026-10-01 — Phase 2 complete
+
+Database tier up and validated. The schema does not merely hold the mandatory fields — it *enforces*
+them, so the hard design rules survive a careless loader:
+
+- **The Kohesio rule is now a CHECK constraint on both sides.** `sections` rejects
+  `machine_translated` and `sections_translated` rejects everything else, so translated text cannot
+  reach the core corpus and nothing else can be parked in the restricted tier. Previously this was a
+  convention that code was trusted to honour.
+- `source_url`/`fetch_date`/`licence`/`attribution` are `NOT NULL`; `source_date` is nullable
+  *deliberately*, since some upstreams publish none and it must never be guessed.
+- `programme_period` and `iso_country` are `DOMAIN`s over `text` with CHECKs rather than `ENUM`s:
+  easier to extend for 2028-2034 and 2035-2041, and it keeps type OIDs out of the migration
+  comparison.
+- `sections_translated` is built with `LIKE sections INCLUDING GENERATED`, so the two tiers cannot
+  drift apart as columns are added. Verified: both are 22 columns with identical types.
+
+All eleven constraint probes behaved (see the Phase 2 validation table). `unaccent` was added beyond
+the plan — the corpus is English-origin but its organisation and place names are not.
+
+The HNSW index is deliberately **not** in `03-indexes.sql`: building it on an empty table and then
+inserting 50,000 rows is far slower than bulk-loading then building, and 6.2 needs to time that build
+for the cap decision. It lives in `containers/db/hnsw.sql` instead.
+
+Host test suite is **33 passed**, not the 32 the plan claimed — it was 29 before this phase and
+`tests/test_config.py` added four.
