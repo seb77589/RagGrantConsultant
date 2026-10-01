@@ -18,6 +18,10 @@ If a session ends abruptly, a fresh session should do exactly this:
    the checkbox is only a claim, and the claim may predate a `docker compose down -v`.
 4. Continue from the first unticked step.
 
+This work lives on the **`containerisation`** branch, not `main`. Each phase is committed as it
+completes, and the commit is recorded in the Status table — so a step's checkbox can always be traced
+to the change that earned it.
+
 **Ground truth is the machine, not this file.** These three commands say what actually exists:
 
 ```bash
@@ -38,8 +42,8 @@ This file links to them rather than duplicating them.
 
 | Phase | What it delivers | State | Date | Commit |
 |---|---|---|---|---|
-| 0 | Preflight and baseline | **done** | 2026-10-01 | |
-| 1 | Scaffolding, `.env`, secrets, doc amendments | not started | | |
+| 0 | Preflight and baseline | **done** | 2026-10-01 | `b703ba8` |
+| 1 | Scaffolding, `.env`, secrets, doc amendments | **done** | 2026-10-01 | |
 | 2 | Database tier (PostgreSQL + pgvector) | not started | | |
 | 3 | Pipeline image | not started | | |
 | 4 | Parity gate | not started | | |
@@ -268,16 +272,22 @@ CUDA 13.2. Every pin either resolved or was corrected and then resolved; no pin 
 
 ## Phase 1 — Scaffolding
 
-- [ ] **1.1 Create the directory skeleton** — `containers/`, `secrets/.gitkeep`, and
-      `data/cache/.gitkeep` (the gitignore names a `data/cache/.gitkeep` that does not exist on disk).
-- [ ] **1.2 Write `.env.example`** with every variable commented, and generate a real `.env`.
-- [ ] **1.3 Generate secrets** into `secrets/` using the `_FILE` convention Authelia documents as
-      preferred: `…RESET_PASSWORD_JWT_SECRET_FILE`, `…SESSION_SECRET_FILE`,
-      `…STORAGE_ENCRYPTION_KEY_FILE`, `…LDAP_PASSWORD_FILE`, `…STORAGE_POSTGRES_PASSWORD_FILE`; plus
-      LLDAP's `LLDAP_JWT_SECRET`, `LLDAP_KEY_SEED`, `LLDAP_LDAP_USER_PASS`.
-- [ ] **1.4 Write `compose.yaml`** — service skeleton, profiles, networks, named volumes.
-- [ ] **1.5 Amend `CLAUDE.md` and `README.md`.** Leaving these stale is how the next session
-      re-derives the wrong stack:
+- [x] **1.1 Create the directory skeleton** — `containers/{pipeline,caddy,authelia,lldap,db/initdb}`,
+      `secrets/.gitkeep`, `data/snapshots/`, `data/cache/.gitkeep`. Confirmed via `git check-ignore`
+      that `secrets/` and `data/cache/*` are ignored while their `.gitkeep` files are not.
+- [x] **1.2 Write `.env.example`** — every variable commented with why it exists, not just what it
+      is. Image pins deliberately **not** in `.env`: they live in `compose.yaml` so the versions in
+      use are version-controlled and cannot drift per machine.
+- [x] **1.3 Generate secrets** via `containers/gen-secrets.sh` — idempotent (existing values are
+      reported as `keep`, never rotated, since rotating the storage encryption key would make
+      existing Authelia rows unreadable). Seven secrets at exactly 64 chars (32 for the LDAP bind
+      password), no trailing newline, `0600`, in a `0700` directory. One shared `ldap_admin_password`
+      serves both LLDAP's admin account and Authelia's bind.
+- [x] **1.4 Write `compose.yaml`** — `name: gcr`, two networks, six named volumes, shared logging
+      anchor, and the `db` service complete. Services are added as their phase is validated rather
+      than all at once, so everything in the committed file has been proven to come up.
+- [x] **1.5 Amend `CLAUDE.md` and `README.md`** — done, including a container-first Setup section in
+      the README and the `docker compose run --rm pipeline …` command set in both:
   - `CLAUDE.md` "Not installed… `podman`, `postgresql` with `pgvector`, `caddy`" → the
     Docker/Compose/NVIDIA-toolkit reality, and "no host packages required".
   - `CLAUDE.md` "**Rootless Podman** with Quadlet systemd units" → Docker Compose with profiles,
@@ -288,13 +298,15 @@ CUDA 13.2. Every pin either resolved or was corrected and then resolved; no pin 
     that can be ticked independently as the phases land.
   - `README.md` "Not yet installed on the development machine…" → same correction.
 
-**Validation**
+**Validation** — run, passed:
 
 ```bash
-docker compose config
+docker compose --profile core config
 ```
 
-Parses and resolves every variable with no warnings.
+Resolves every variable with no warnings. Note the `--profile core`: without it the output is
+`services: {}`, because every service sits behind a profile. A bare `docker compose config` therefore
+validates nothing useful here, which is worth knowing before trusting it as a check.
 
 ---
 
@@ -554,3 +566,24 @@ they contradict what was planned:
    R4's containerd-store switch. Benign for this plan; the other projects will re-pull.
 
 The CDI spec lives at `/var/run/cdi/nvidia.yaml`, not `/etc/cdi`, and is regenerated per boot.
+
+### 2026-10-01 — Phase 1 complete
+
+Scaffolding, `.env.example`, the secret generator, `compose.yaml` with the `db` service, and the
+`CLAUDE.md`/`README.md` amendments. Two bugs caught by validating rather than assuming:
+
+1. **The first secret generator produced short secrets.** It base64-encoded exactly the target
+   number of bytes, then stripped `=+/`, then truncated — so the output was always *under* the
+   requested length. `authelia_storage_encryption_key` came out at **60 characters against Authelia's
+   64-character minimum**, which would have failed in Phase 7 with an error that does not mention
+   length. Now it over-generates in a loop and truncates down to an exact length.
+2. **The PG18 image does not use `/var/lib/postgresql/data`.** It sets
+   `PGDATA=/var/lib/postgresql/18/docker` and declares its `VOLUME` at `/var/lib/postgresql`. The
+   conventional `pgdata:/var/lib/postgresql/data` mount would have persisted *nothing* — the real
+   data directory would have landed in an anonymous volume, and `docker compose down -v` would have
+   taken the corpus with it while appearing to have a named volume. `compose.yaml` mounts
+   `pgdata:/var/lib/postgresql`.
+
+Also worth recording: `docker compose config` with no `--profile` prints `services: {}` and exits 0,
+because every service is behind a profile. As a validation step that is worthless; the profile must
+be named.

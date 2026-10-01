@@ -7,7 +7,10 @@
 .env.*
 !.env.example
 *.secret
-secrets/
+# `secrets/*` rather than `secrets/`: an excluded directory is never descended
+# into, so a `!secrets/.gitkeep` negation under `secrets/` can never take
+# effect and the directory would be missing from a fresh clone.
+secrets/*
 !secrets/.gitkeep
 *.pem
 *.key
