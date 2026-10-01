@@ -25,22 +25,27 @@ repository itself.
 | Caddy, Authelia, LLDAP images | ~300 MB | |
 | small volumes (`caddy_data`, `lldap_data`, `authelia_data`) | < 1 MB | |
 | repository working tree | 555 MB | includes the gitignored CORDIS zip and snapshots |
-| **Docker build cache** | **46 GB** | **pure overhead — see below** |
+| Docker build cache | 0 GB | 46.1 GB was reclaimed on 2026-10-01 — see below |
 
-Free disk went from 374 GB to 288 GB.
+Free disk went from 374 GB before any of this work to **324 GB** after the build
+cache was reclaimed, so the project's standing footprint is **about 50 GB**.
 
-### Reclaim the build cache first
+### The build cache has already been reclaimed
 
-46 GB of the above is build cache, kept only to make image rebuilds fast. It is
-the single largest and least useful item:
+Building the `embed` target left 46.1 GB of build cache, kept only to make
+rebuilds fast. It was reclaimed with:
 
 ```bash
-docker builder prune            # interactive, keeps nothing referenced
-docker builder prune --all      # everything
+docker builder prune --all --force
 ```
 
-This is **global**, not per-project, so it also discards cache for anything else
-built on this machine. Nothing breaks; the next build is just slower.
+Free disk went 288 GB → 324 GB. Running containers, volumes and images are all
+untouched by this; the only cost is that the next `docker compose build` of the
+pipeline image starts from scratch and re-downloads the torch wheels.
+
+Note this command is **global**, not per-project: it also discards build cache
+for anything else built on this machine. Nothing breaks, builds are just slower.
+Worth re-running after any future image rebuild, since the cache comes back.
 
 ## Teardown, least to most destructive
 

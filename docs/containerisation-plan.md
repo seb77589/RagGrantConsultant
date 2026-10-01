@@ -626,9 +626,11 @@ identity rebootstrapped by script, 50,940 rows reloaded, HNSW rebuilt in 9.1 s (
 and the edge chain still giving 302 / 200 / 200. The model-weight volumes were deliberately kept,
 since `containers/fetch-model.sh` is separately verified and re-downloading 14 GB proves nothing new.
 
-Storage: free disk went 374 GB → 288 GB. **46 GB of the 86 GB consumed is Docker build cache**, which
-is pure overhead and reclaimable with `docker builder prune --all` — the single easiest thing to
-reclaim, noted in `teardown.md`.
+Storage: free disk went 374 GB → 288 GB, of which **46.1 GB was Docker build cache** left behind by
+building the `embed` image. That has since been reclaimed with `docker builder prune --all`, taking
+free disk back to **324 GB** with running containers, volumes and images untouched. The project's
+standing footprint is therefore **about 50 GB** — images, the model and corpus volumes, and the
+repository. See [`teardown.md`](teardown.md).
 
 ---
 
@@ -934,7 +936,7 @@ repository.
 The from-zero rebuild worked without a single manual fixup, which is the real test of whether the
 plan's artefacts are complete. One number is worth flagging to whoever reads this next: of the 86 GB
 consumed, **46 GB is Docker build cache** — reclaimable in one command and by far the easiest saving
-available.
+available. (Since reclaimed: free disk is back to 324 GB and the standing footprint is ~50 GB.)
 
 Two limits worth stating plainly rather than leaving implied. The latency and throughput figures
 throughout are single-user, warm-cache, single-concurrency on one laptop GPU; they say nothing about
