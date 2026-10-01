@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import DATABASE_URL, EMBED_DIM, SECTIONS_TABLE
@@ -150,7 +150,22 @@ def record_run(
 
 @dataclass(frozen=True)
 class Hit:
-    """One retrieved section, carrying everything a citation needs."""
+    """One retrieved section, carrying everything a citation needs.
+
+    `licence`, `attribution`, `origin` and `programme_period` are here because
+    an answer cannot be made compliant without them, and they were previously
+    written at ingestion but never read back:
+
+    * CLAUDE.md requires "© European Union" with the source link on *every cited
+      source*, which means `attribution` and `licence` must travel with the text
+      rather than be looked up again.
+    * The Kohesio rule requires the translated tier to be *labelled in answers*,
+      which needs `origin`.
+
+    Field order is load-bearing: all three search functions build hits as
+    `Hit(*row)` from `_SELECT` plus a trailing score, so this list and `_SELECT`
+    must stay in the same order.
+    """
 
     section_id: str
     source_system: str
@@ -160,17 +175,39 @@ class Hit:
     fetch_date: Any
     country: str | None
     programme: str | None
+    programme_period: str | None
+    origin: str
+    licence: str
+    attribution: str
     text: str
     score: float
 
     def citation(self) -> str:
-        as_of = self.source_date.isoformat() if self.source_date else "no upstream date"
-        return f"{self.source_system}:{self.source_id} ({as_of}) {self.source_url}"
+        """Short form, for terminal output and logs."""
+        return f"{self.source_system}:{self.source_id} ({self.as_of()}) {self.source_url}"
+
+    def as_of(self) -> str:
+        """The date a reader should judge this text by.
+
+        Never silently substitutes the fetch date: a document with no upstream
+        date says so, because claiming an "as of" we do not have is the same
+        class of error as inventing a figure.
+        """
+        return self.source_date.isoformat() if self.source_date else "no upstream date"
+
+    def attributed_citation(self) -> str:
+        """Full form, as it must appear beside a quote in an answer."""
+        return f"{self.citation()} — {self.attribution} ({self.licence})"
+
+    def is_translated(self) -> bool:
+        return self.origin == "machine_translated"
 
 
+# Order must match the Hit field order above, up to but excluding `score`.
 _SELECT = """
     section_id, source_system, source_id, source_url, source_date,
-    fetch_date, country, programme, text
+    fetch_date, country, programme, programme_period, origin,
+    licence, attribution, text
 """
 
 
@@ -306,14 +343,14 @@ def search_hybrid(
             hits[hit.section_id] = hit
 
     top = sorted(ranked.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-    merged = []
-    for section_id, score in top:
-        h = hits[section_id]
-        merged.append(
-            Hit(h.section_id, h.source_system, h.source_id, h.source_url, h.source_date,
-                h.fetch_date, h.country, h.programme, h.text, score)
-        )
-    return merged
+    # `replace` rather than re-listing every field positionally: Hit has grown
+    # once already, and a positional rebuild silently mis-assigns fields the
+    # next time it grows.
+    #
+    # Note what the returned score now means. It is a fusion artefact -- a sum
+    # of reciprocal ranks -- not a relevance score, so it is comparable only
+    # within one query's results. Downstream reranking replaces it.
+    return [replace(hits[section_id], score=score) for section_id, score in top]
 
 
 # ---------------------------------------------------------------------------
@@ -362,12 +399,26 @@ def table_stats(conn: Any, table: str = SECTIONS_TABLE) -> dict[str, Any]:
 
 
 def as_json(hits: Sequence[Hit]) -> str:
+    """Machine-readable hits, carrying everything a citation needs.
+
+    Attribution and licence are included rather than dropped: anything that
+    consumes this is a step away from showing the text to someone, and the
+    attribution rule applies to every cited source.
+    """
     return json.dumps(
         [
             {
                 "section_id": h.section_id,
                 "citation": h.citation(),
+                "source_url": h.source_url,
+                "as_of": h.as_of(),
+                "attribution": h.attribution,
+                "licence": h.licence,
                 "country": h.country,
+                "programme": h.programme,
+                "programme_period": h.programme_period,
+                "origin": h.origin,
+                "translated": h.is_translated(),
                 "score": round(h.score, 6),
                 "text": h.text[:300],
             }

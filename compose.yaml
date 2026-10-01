@@ -103,6 +103,12 @@ services:
       # instead, so a host-side `uv run` needs no setup.
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       HF_HOME: /opt/hf
+      # `gcr ask` and `gcr search` reach the model services over the network
+      # rather than loading a model in-process, so they need these even though
+      # `load` and `sections` do not. TEI listens on 80, not 8080.
+      TEI_EMBED_URL: http://tei-embed:80
+      TEI_RERANK_URL: http://tei-rerank:80
+      LLM_URL: http://llm:8080
       TZ: ${TZ:-Etc/UTC}
     volumes:
       # Must be /app/data, not /data: config.py derives paths from REPO_ROOT
@@ -192,9 +198,11 @@ services:
     logging: *default-logging
     command:
       - "--model-id=${RERANK_MODEL_ID:-BAAI/bge-reranker-v2-m3}"
-      # Rerank batches are small and bounded (a few dozen candidates), so this
-      # is kept low to leave VRAM for generation.
-      - "--max-client-batch-size=32"
+      # Sized to hold a full candidate pool in one request. 32 was too low:
+      # retrieval sends RETRIEVE_CANDIDATES (50) and TEI rejects an oversized
+      # batch with HTTP 422. The client batches anyway, so this is headroom
+      # rather than a hard dependency, and VRAM has room (8.7 of 16 GB used).
+      - "--max-client-batch-size=64"
       - "--auto-truncate"
     environment:
       HUGGINGFACE_HUB_CACHE: /data
@@ -341,6 +349,43 @@ services:
     # No healthcheck override: the image ships its own (/app/healthcheck.sh),
     # and 4.39 has no `authelia health` subcommand to call instead. Writing one
     # here only replaced a working check with a broken one.
+
+  # The answer endpoint. Reachable only through Caddy, which is what makes it
+  # safe to trust the Remote-Groups header Authelia sets -- see src/gcr/api.py.
+  api:
+    build:
+      context: .
+      dockerfile: containers/pipeline/Containerfile
+      target: api
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: gcr-pipeline:api
+    profiles: ["edge"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # TEI listens on 80 inside its container, not 8080.
+      TEI_EMBED_URL: http://tei-embed:80
+      TEI_RERANK_URL: http://tei-rerank:80
+      LLM_URL: http://llm:8080
+      TZ: ${TZ:-Etc/UTC}
+    # No ports: published nothing, reachable only from the two networks below.
+    networks:
+      # backend for the database and the model services, edge so Caddy can
+      # reach it. The same split authelia uses.
+      - backend
+      - edge
+    healthcheck:
+      # Liveness only, and curl is absent from python:slim, so this uses the
+      # interpreter that is certainly present.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=5).status==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   caddy:
     image: caddy:2.11.4-alpine

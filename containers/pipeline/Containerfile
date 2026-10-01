@@ -105,3 +105,27 @@ RUN chown -R "${HOST_UID}:${HOST_GID}" /opt/venv /opt/hf
 USER ${HOST_UID}:${HOST_GID}
 
 CMD ["gcr", "--help"]
+
+# ---------------------------------------------------------------------------
+# api -- the HTTP endpoint
+# ---------------------------------------------------------------------------
+# Built on `base`, not on `embed`: query embedding goes to the TEI service over
+# HTTP, so this needs neither torch nor a GPU. The whole image is a few MB more
+# than base.
+FROM base AS api
+
+USER root
+
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra tokenize --extra api \
+ && uv pip install pytest ruff
+
+USER ${HOST_UID}:${HOST_GID}
+
+EXPOSE 8000
+# One worker: the bottleneck is the GPU behind the model services, not this
+# process, and a second worker would only queue for the same card.
+CMD ["uvicorn", "gcr.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

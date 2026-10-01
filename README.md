@@ -19,7 +19,8 @@ containers: PostgreSQL + pgvector with hybrid retrieval, bge-m3 and the reranker
 on llama.cpp, and the Caddy/Authelia/LLDAP login chain. Nothing is installed on the host --
 [`docs/containerisation-plan.md`](docs/containerisation-plan.md) tracks the build-out and
 [`docs/teardown.md`](docs/teardown.md) says how to give the disk back. What remains for Phase 1 is
-reranking in the retrieval path, answer composition with sources, and the evaluation set.
+the eligibility engine (SME status, de minimis headroom, regional aid ceilings as rules in code)
+and the ~150-question evaluation set.
 
 | Piece | State |
 |---|---|
@@ -35,8 +36,11 @@ reranking in the retrieval path, answer composition with sources, and the evalua
 | Caddy, Authelia, LLDAP login chain | done |
 | Group-based access restriction, enforced in SQL | done |
 | Migration-equivalence proof | done |
-| Reranking wired into the retrieval path | not started |
-| Answer composition with sources | not started |
+| Reranking wired into the retrieval path | done |
+| Answer composition with sources | done |
+| No-hallucinated-figures guard, enforced in code | done |
+| HTTP endpoint behind the login chain | done |
+| Eligibility rules in code (SME, de minimis, aid ceilings) | not started |
 | ~150-question evaluation set | not started |
 
 ## Requirements
@@ -58,6 +62,8 @@ Containerised (canonical -- no host packages beyond Docker, which is already pre
 ./containers/gen-secrets.sh                # once: writes .env and secrets/, idempotent
 docker compose --profile core up -d        # PostgreSQL + pgvector
 docker compose run --rm pipeline gcr --help
+docker compose --profile models up -d              # embeddings, reranker, generation
+docker compose --profile edge up -d                # Caddy, the login chain, /ask
 ```
 
 On the host (a dev convenience; the same code, the same results):
@@ -76,6 +82,25 @@ uv run gcr sections horizon --out data/interim/horizon.jsonl
 uv run gcr benchmark-embed horizon --n 10000
 uv run gcr manifest               # show what has been fetched
 ```
+
+Retrieval and answering need the `models` profile up, since query embedding,
+reranking and generation all happen in the model services:
+
+```bash
+docker compose run --rm pipeline gcr search "hydrogen storage" --limit 5
+docker compose run --rm pipeline gcr ask "What hydrogen storage projects are funded?"
+docker compose run --rm pipeline gcr ask "..." --json       # machine-readable
+docker compose run --rm pipeline gcr ask "..." --groups consultants,restricted
+```
+
+Answers quote only the retrieved sections. Every figure in an answer is checked
+against the retrieved text by code, and anything unsupported is marked inline and
+flagged -- the prompt asks, the check enforces. Each source carries its identifier,
+its "as of" date and its attribution, and the independence disclaimer is attached
+to every answer.
+
+The same path is served over HTTP at `POST /ask`, behind Caddy and Authelia, which
+is where access groups come from instead of `--groups`.
 
 Every command above has a containerised equivalent -- `docker compose run --rm pipeline gcr
 sections horizon` and so on -- which is the form used for anything whose result is recorded, so

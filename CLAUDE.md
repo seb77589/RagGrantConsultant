@@ -30,6 +30,7 @@ The containerised path is the canonical one — the host venv above stays as a d
 ./containers/gen-secrets.sh                     # once: writes .env and secrets/ (idempotent)
 docker compose --profile core up -d             # PostgreSQL + pgvector
 docker compose run --rm pipeline gcr sections horizon
+docker compose run --rm pipeline gcr ask "..."       # needs the models profile
 docker compose run --rm pipeline pytest
 docker compose --profile core --profile models --profile auth --profile edge up -d
 ```
@@ -73,6 +74,9 @@ Runtime, per the report's work packages:
 - **Model serving behind one OpenAI-compatible endpoint**: Qwen3.5-9B at 4-bit for generation,
   `bge-m3` for embeddings (1024 dimensions), `bge-reranker-v2-m3` for reranking.
 - **Pipelines**: ingestion → chunking → embedding; then retrieval → rerank → answer with sources.
+  The answer half lives in `src/gcr/{services,retrieve,figures,answer,api}.py`: `retrieve` adds
+  reranking on top of `db.search_hybrid`, `answer` composes and cites, and `figures` enforces the
+  no-hallucinated-figures rule in code rather than trusting the prompt.
 
 Retrieval path: structured eligibility filter (country, NUTS region, company size, NACE sector,
 programme, status, deadline) → hybrid keyword + vector search → merge → rerank → 6–10 sections into
@@ -95,7 +99,11 @@ broken by new code:
   regional aid ceilings are computed by code; the model only explains the computed result, with
   sources.
 - **No hallucinated figures.** Refuse to state amounts, funding rates, or deadlines that are not
-  present in the retrieved text; show the supporting quote; flag stale documents.
+  present in the retrieved text; show the supporting quote; flag stale documents. Enforced by
+  `gcr.figures.unsupported`, which compares *normalised* values so that "EUR 12 million" against a
+  source saying "EUR 12,000,000" counts as quoted, not invented. The prompt asks; the check enforces.
+  Two limits are deliberate and documented: a coincidentally-present number passes, and a false claim
+  made in words carries no figure to check.
 - **Keep Kohesio's machine-translated text out of the core corpus.** Kohesio English is eTranslation
   output, which breaks the English-origin rule. Use its structured fields (numbers, codes, regions)
   and generate English sentences from them. Any translated tier lives in a separate table and index,

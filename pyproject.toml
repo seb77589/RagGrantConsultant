@@ -19,6 +19,12 @@ dependencies = [
 tokenize = [
     "transformers>=4.44",
 ]
+# The HTTP endpoint. Small, and separate from the ingestion path so the pipeline
+# image does not carry a web framework it never serves.
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
 # Heavy GPU stack, installed separately: uv sync --extra embed
 embed = [
     "torch>=2.4",

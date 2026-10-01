@@ -52,6 +52,15 @@ def fetch(
     typer.echo(f"upstream last-modified: {record.upstream_last_modified}")
 
 
+def _parse_groups(groups: str) -> list[str]:
+    """Comma-separated access groups from the command line.
+
+    An empty value yields an empty list, which `db._filters` reads as the public
+    tier only -- not as "no filter". That default matters more than it looks.
+    """
+    return [g.strip() for g in groups.split(",") if g.strip()]
+
+
 def _source_fetch_date(url: str):
     """When the payload behind `url` was actually downloaded, per the manifest.
 
@@ -300,23 +309,28 @@ def search(
     """Retrieve sections. Access filtering happens in SQL, never in a prompt."""
     from .db import as_json, connect, search_fulltext, search_hybrid, search_vector
 
-    group_list = [g.strip() for g in groups.split(",") if g.strip()]
+    group_list = _parse_groups(groups)
+
+    if mode not in ("hybrid", "vector", "fulltext"):
+        # Validated before any embedding work: an unknown mode used to pay for a
+        # model load before failing.
+        raise typer.BadParameter(f"unknown mode {mode!r}; choose hybrid, vector or fulltext")
 
     vector = None
     if mode in ("hybrid", "vector"):
-        from .embed import embed_texts, load_model
+        from .services import embed_query
 
-        vector = embed_texts(load_model(fp16=True), [query])[0]
+        # The TEI service, not an in-process model: same weights as the index
+        # (measured cosine agreement 0.999988), no GPU, and no per-query load.
+        vector = embed_query(query)
 
     with connect() as conn:
         if mode == "fulltext":
             hits = search_fulltext(conn, query, group_list, country, limit=limit)
         elif mode == "vector":
             hits = search_vector(conn, vector, group_list, country, limit=limit)
-        elif mode == "hybrid":
-            hits = search_hybrid(conn, query, vector, group_list, country, limit=limit)
         else:
-            raise typer.BadParameter(f"unknown mode {mode!r}")
+            hits = search_hybrid(conn, query, vector, group_list, country, limit=limit)
 
     if as_json_out:
         typer.echo(as_json(hits))
@@ -325,3 +339,46 @@ def search(
     for i, h in enumerate(hits, 1):
         typer.echo(f"\n{i}. [{h.score:.4f}] {h.citation()}")
         typer.echo(f"   {h.text[:200].replace(chr(10), ' ')}")
+
+
+@app.command()
+def ask(
+    question: Annotated[str, typer.Argument(help="the question")],
+    country: Annotated[str | None, typer.Option(help="ISO-2 eligibility filter")] = None,
+    period: Annotated[str | None, typer.Option(help="programme period, e.g. 2021-2027")] = None,
+    groups: Annotated[str, typer.Option(help="comma-separated access groups")] = "public",
+    top_k: Annotated[int, typer.Option(help="sections into the generation context")] = 0,
+    as_json_out: Annotated[bool, typer.Option("--json", help="machine-readable")] = False,
+) -> None:
+    """Answer a question from the corpus, with sources.
+
+    Retrieval, reranking and generation all happen in the model services, so this
+    needs the `models` profile up. Access filtering is applied in SQL from
+    `--groups`; the HTTP endpoint takes the same value from the authenticated
+    session instead.
+    """
+    from .answer import as_dict, compose
+    from .db import connect
+    from .retrieve import retrieve
+    from .services import ServiceUnavailable
+
+    group_list = _parse_groups(groups)
+    k = top_k or config.RERANK_TOP_K
+
+    try:
+        with connect() as conn:
+            hits = retrieve(conn, question, group_list, country, period, top_k=k)
+        result = compose(question, hits)
+    except ServiceUnavailable as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if as_json_out:
+        typer.echo(json.dumps(as_dict(result), indent=2, ensure_ascii=False))
+        return
+
+    typer.echo(result.render())
+    if result.flags:
+        typer.secho(
+            f"\n{len(result.flags)} flag(s) raised; see Flags above.",
+            fg=typer.colors.YELLOW,
+        )
