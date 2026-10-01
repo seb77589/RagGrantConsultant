@@ -51,6 +51,18 @@ grants.localhost {
 			copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 		}
 
+		# The answer endpoint, behind the forward_auth above. It must come
+		# before file_server, which would otherwise 404 the path.
+		#
+		# Generation takes tens of seconds on one laptop GPU, so the default
+		# proxy read timeout is far too short and a slow answer would surface
+		# as a 502 rather than as a slow answer.
+		reverse_proxy /ask* api:8000 {
+			transport http {
+				read_timeout 300s
+			}
+		}
+
 		root * /srv
 		file_server browse
 	}

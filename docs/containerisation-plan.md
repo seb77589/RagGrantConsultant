@@ -943,3 +943,51 @@ throughout are single-user, warm-cache, single-concurrency on one laptop GPU; th
 concurrent users. And the generation model passed a coherence smoke test, not an evaluation — the
 ~150-question evaluation set that Phase 1 calls for is still to come, and R1's fallback stays on
 record until then.
+
+---
+
+## Follow-on: reranking and answer composition (2026-10-01)
+
+Not part of the twelve phases above, but it completes the path they left half-wired and is recorded
+here because it changed the compose file and found two faults in it.
+
+The stack had the reranker and the generation model running, healthy and measured, and **nothing
+called either**. `gcr ask` and `POST /ask` now close that: filter → hybrid → rerank → 6–10 sections →
+answer with sources. Measured end to end, **12.9 s** for a question over the 50,940-section corpus.
+
+### What it proves that the phases above could not
+
+- **Caddy and Authelia now guard something real.** Unauthenticated `POST /ask` → **303** to the
+  portal (303, not 302, because the request is a POST). Authenticated → an answer, with
+  `Remote-Groups` feeding the SQL filter.
+- **Row-level access works through a real request path**, not a test script. A restricted section was
+  inserted and asked about by both users: alice (`consultants`) got "The retrieved sources do not
+  state this"; bob (`consultants`, `restricted`) got the section and quoted its figure with a
+  citation. This is the Phase 9 check again, now with Authelia supplying the identity.
+- **The no-hallucinated-figures rule is enforced rather than requested.** Proven against real
+  retrieved context by substituting a model reply that invents three figures: all three were caught
+  and marked — `EUR 45,000,000`, `85%`, `3 March 2027`. Asked to express a contribution as a
+  percentage of total cost, the model refused rather than calculating, which is what the prompt
+  demands and the guard would have caught had it not.
+
+### Two faults in the containerisation work, found by using it
+
+1. **`tei-rerank` was configured smaller than retrieval needs.** `--max-client-batch-size=32` against
+   `RETRIEVE_CANDIDATES=50` gave `HTTP 422: batch size 50 > maximum allowed batch size 32` — two of
+   my own decisions in direct conflict, each defensible alone. Fixed on both sides: the flag is now
+   64, and `services.rerank` batches regardless, so the breadth of retrieval is no longer coupled to
+   a serving flag.
+2. **A branch switch silently broke Caddy.** Checking out `main` while it was still at the
+   pre-containerisation commit deleted `containers/` from the working tree; the fast-forward then
+   recreated it as a *new inode*, leaving the running container's bind mount pointing at a deleted
+   one. Caddy stayed up, reported `unhealthy`, and served 404 for every file. The healthcheck error
+   named it precisely — `current working directory is outside of container mount namespace root` —
+   but nothing else did. **Any long-running container with a bind mount into the repository needs
+   `--force-recreate` after a branch switch that touches the mounted path.**
+
+### Still open
+
+The **~150-question evaluation set**. R1 stays open until it exists: Qwen3.5-9B has now answered
+real questions well, refused correctly twice, and honoured "never calculate" — but that is a handful
+of observations, not an evaluation, and the plain-dense fallback stays on record. The figure guard's
+flags are deliberately countable so that the eval set can report a rate rather than an impression.
